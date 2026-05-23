@@ -9,8 +9,6 @@ Usage:
     alteria add collection PATH
     alteria add kind PATH SINGULAR [PLURAL]
     alteria move <entity-path> <new-parent>
-
-Future:
     alteria rename <old-path> <new-slug>
 """
 from __future__ import annotations
@@ -23,6 +21,7 @@ import click
 from .helpers import (
     content_root,
     execute_move,
+    execute_rename,
     find_project_root,
     is_entity_folder,
     is_kind_folder,
@@ -30,6 +29,7 @@ from .helpers import (
     list_kinds_tree,
     list_tree,
     plan_move,
+    plan_rename,
 )
 
 
@@ -277,20 +277,67 @@ def add_kind(
 
 
 # ---------------------------------------------------------------------------
-# rename (stub — not yet implemented)
+# rename
 # ---------------------------------------------------------------------------
 
 @cli.command()
 @click.argument("old_path")
 @click.argument("new_slug")
-def rename(old_path: str, new_slug: str) -> None:
-    """[NOT YET IMPLEMENTED] Rename an entity or kind slug.
+@click.option("--dry-run", is_flag=True, help="Show what would change without touching files.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+@click.pass_context
+def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes: bool) -> None:
+    """Rename an entity slug or a kind slug, updating all references.
 
-    OLD_PATH is relative to content/ (or content_meta/kinds/).
-    NEW_SLUG is the new folder name (slug only, no parent path).
+    OLD_PATH is relative to content/ for entities, or relative to
+    content_meta/kinds/ for kinds.  The tool checks content/ first;
+    if not found there it tries content_meta/kinds/.
+
+    NEW_SLUG is the new folder name only — no slashes.
+
+    For entities, updates: target: relations and full-path wikilinks.
+    For kinds, updates: kind: fields, kinds/<slug> affinity fields,
+    and [[kinds/<slug>...]] wikilinks.
+
+    Use --dry-run to preview every change before committing.
     """
-    click.echo("rename: not yet implemented.", err=True)
-    sys.exit(1)
+    root: Path = ctx.obj["root"]
+
+    plan = plan_rename(root, old_path.rstrip("/"), new_slug)
+
+    if plan.error:
+        click.echo(f"Error: {plan.error}", err=True)
+        sys.exit(1)
+
+    kind_label = "kind" if plan.is_kind else "entity"
+    id_root = "content_meta/kinds" if plan.is_kind else "content"
+    click.echo(f"Rename {kind_label}:  {id_root}/{plan.old_id}")
+    click.echo(f"              ->  {id_root}/{plan.new_id}")
+
+    if plan.refs:
+        click.echo(f"\nReferences to update ({len(plan.refs)}):")
+        for ref in plan.refs:
+            rel = ref.file.relative_to(root)
+            click.echo(f"  {rel}:{ref.line_no}")
+            click.echo(f"    - {ref.old_text.strip()}")
+            click.echo(f"    + {ref.new_text.strip()}")
+    else:
+        click.echo("\nNo references found — only the folder will be renamed.")
+
+    if dry_run:
+        click.echo("\n(dry run — no files changed)")
+        return
+
+    if not yes:
+        click.confirm("\nProceed?", abort=True)
+
+    try:
+        execute_rename(plan)
+    except Exception as exc:
+        click.echo(f"Error during rename: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"\nDone.  Renamed to {id_root}/{plan.new_id}")
 
 
 # ---------------------------------------------------------------------------

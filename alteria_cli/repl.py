@@ -21,12 +21,14 @@ from prompt_toolkit.styles import Style
 from .helpers import (
     content_root,
     execute_move,
+    execute_rename,
     is_entity_folder,
     is_kind_folder,
     kinds_root,
     list_kinds_tree,
     list_tree,
     plan_move,
+    plan_rename,
 )
 
 # ---------------------------------------------------------------------------
@@ -50,6 +52,7 @@ TOP_LEVEL_COMMANDS = [
     "cd",
     "add",
     "move",
+    "rename",
     "help",
     "exit",
     "quit",
@@ -203,6 +206,15 @@ class AlteriaCompleter(Completer):
             # Both args complete over content/ paths
             if len(tokens) in (2, 3):
                 yield from _complete_fs_path(fragment, self._content)
+            return
+
+        # ---- rename <old-path> <new-slug> -----------------------------------
+        if cmd == "rename":
+            if len(tokens) == 2:
+                # Try content first, then kinds
+                yield from _complete_fs_path(fragment, self._content)
+                yield from _complete_fs_path(fragment, self._kinds)
+            # token 3 is a free-text slug — no completion
             return
 
 
@@ -505,6 +517,79 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session:
         print(f"  Error during move: {exc}")
 
 
+def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], session: PromptSession) -> None:
+    kinds = kinds_root(project)
+    old_path = args[0] if len(args) > 0 else None
+    new_slug = args[1] if len(args) > 1 else None
+
+    if old_path is None:
+        try:
+            default_path = str(cwd.relative_to(content))
+        except ValueError:
+            default_path = ""
+        # Complete over both content and kinds
+        class _BothCompleter(Completer):
+            def __init__(self, c: Path, k: Path) -> None:
+                self._c, self._k = c, k
+            def get_completions(self, document, complete_event):  # noqa: ANN001
+                yield from _complete_fs_path(document.text_before_cursor, self._c)
+                yield from _complete_fs_path(document.text_before_cursor, self._k)
+
+        old_path = _ask(session, "entity or kind path", _BothCompleter(content, kinds), default=default_path)
+        if not old_path:
+            return
+
+    if new_slug is None:
+        new_slug = _ask(session, "new slug")
+        if not new_slug:
+            return
+
+    # Resolve relative to cwd first, then content root, then kinds root
+    def _resolve(p: str) -> str:
+        p = p.rstrip("/")
+        if (cwd / p).is_dir():
+            candidate = cwd / p
+            if candidate.is_relative_to(content):
+                return str(candidate.relative_to(content))
+            if candidate.is_relative_to(kinds):
+                return str(candidate.relative_to(kinds))
+        return p
+
+    old_path = _resolve(old_path)
+
+    plan = plan_rename(project, old_path, new_slug)
+
+    if plan.error:
+        print(f"  Error: {plan.error}")
+        return
+
+    kind_label = "kind" if plan.is_kind else "entity"
+    id_root = "content_meta/kinds" if plan.is_kind else "content"
+    print(f"  Rename {kind_label}:  {id_root}/{plan.old_id}")
+    print(f"                ->  {id_root}/{plan.new_id}")
+
+    if plan.refs:
+        print(f"\n  References to update ({len(plan.refs)}):")
+        for ref in plan.refs:
+            rel = ref.file.relative_to(project)
+            print(f"    {rel}:{ref.line_no}")
+            print(f"      - {ref.old_text.strip()}")
+            print(f"      + {ref.new_text.strip()}")
+    else:
+        print("  No references found — only the folder will be renamed.")
+
+    confirm = _ask(session, "\n  Proceed? [y/N]")
+    if not confirm or confirm.lower() not in ("y", "yes"):
+        print("  Cancelled.")
+        return
+
+    try:
+        execute_rename(plan)
+        print(f"  Done.  Renamed to {id_root}/{plan.new_id}")
+    except Exception as exc:
+        print(f"  Error during rename: {exc}")
+
+
 def _cmd_help() -> None:
     print(
         """
@@ -520,6 +605,7 @@ def _cmd_help() -> None:
   add collection <path> <title>         create collection folder
   add kind <path> <singular> [plural]   create kind stub
   move <entity-path> <new-parent>       move entity and rewrite all references
+  rename <old-path> <new-slug>          rename entity or kind slug, rewrite all references
   help                                  show this help
   exit / quit                           leave the shell
 
@@ -597,6 +683,8 @@ def run_shell(project: Path) -> None:
             _cmd_add(project, cwd, args, session)
         elif cmd == "move":
             _cmd_move(project, cwd, content, args, session)
+        elif cmd == "rename":
+            _cmd_rename(project, cwd, content, args, session)
         elif cmd == "help":
             _cmd_help()
         else:
