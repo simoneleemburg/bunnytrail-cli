@@ -8,10 +8,10 @@ Usage:
     alteria add entity PATH NAME KIND
     alteria add collection PATH
     alteria add kind PATH SINGULAR [PLURAL]
+    alteria move <entity-path> <new-parent>
 
 Future:
     alteria rename <old-path> <new-slug>
-    alteria move <entity-path> <new-parent>
 """
 from __future__ import annotations
 
@@ -22,12 +22,14 @@ import click
 
 from .helpers import (
     content_root,
+    execute_move,
     find_project_root,
     is_entity_folder,
     is_kind_folder,
     kinds_root,
     list_kinds_tree,
     list_tree,
+    plan_move,
 )
 
 
@@ -275,7 +277,7 @@ def add_kind(
 
 
 # ---------------------------------------------------------------------------
-# rename / move (stubs — not yet implemented)
+# rename (stub — not yet implemented)
 # ---------------------------------------------------------------------------
 
 @cli.command()
@@ -291,17 +293,62 @@ def rename(old_path: str, new_slug: str) -> None:
     sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# move
+# ---------------------------------------------------------------------------
+
 @cli.command()
 @click.argument("entity_path")
 @click.argument("new_parent")
-def move(entity_path: str, new_parent: str) -> None:
-    """[NOT YET IMPLEMENTED] Move an entity to a new parent collection.
+@click.option("--dry-run", is_flag=True, help="Show what would change without touching files.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+@click.pass_context
+def move(ctx: click.Context, entity_path: str, new_parent: str, dry_run: bool, yes: bool) -> None:
+    """Move an entity to a new parent collection and update all references.
 
-    ENTITY_PATH is relative to content/.
-    NEW_PARENT is the destination path relative to content/.
+    ENTITY_PATH is relative to content/ (e.g. aurethia/places/old/myplace).
+    NEW_PARENT  is the destination collection, also relative to content/
+                (e.g. aurethia/places/new-home).
+
+    The entity slug (folder name) is preserved.  All target: relations and
+    full-path wikilinks across the project are rewritten automatically.
+    Use --dry-run to preview every change before committing.
     """
-    click.echo("move: not yet implemented.", err=True)
-    sys.exit(1)
+    root: Path = ctx.obj["root"]
+
+    plan = plan_move(root, entity_path.rstrip("/"), new_parent.rstrip("/"))
+
+    if plan.error:
+        click.echo(f"Error: {plan.error}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Move:  content/{plan.old_id}")
+    click.echo(f"  ->  content/{plan.new_id}")
+
+    if plan.refs:
+        click.echo(f"\nReferences to update ({len(plan.refs)}):")
+        for ref in plan.refs:
+            rel = ref.file.relative_to(root)
+            click.echo(f"  {rel}:{ref.line_no}")
+            click.echo(f"    - {ref.old_text.strip()}")
+            click.echo(f"    + {ref.new_text.strip()}")
+    else:
+        click.echo("\nNo references found — only the folder will move.")
+
+    if dry_run:
+        click.echo("\n(dry run — no files changed)")
+        return
+
+    if not yes:
+        click.confirm("\nProceed?", abort=True)
+
+    try:
+        execute_move(plan)
+    except Exception as exc:
+        click.echo(f"Error during move: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"\nDone.  Moved to content/{plan.new_id}")
 
 
 # ---------------------------------------------------------------------------

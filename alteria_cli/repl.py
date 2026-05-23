@@ -20,11 +20,13 @@ from prompt_toolkit.styles import Style
 
 from .helpers import (
     content_root,
+    execute_move,
     is_entity_folder,
     is_kind_folder,
     kinds_root,
     list_kinds_tree,
     list_tree,
+    plan_move,
 )
 
 # ---------------------------------------------------------------------------
@@ -47,6 +49,7 @@ TOP_LEVEL_COMMANDS = [
     "tree",
     "cd",
     "add",
+    "move",
     "help",
     "exit",
     "quit",
@@ -194,6 +197,13 @@ class AlteriaCompleter(Completer):
                 if len(tokens) == 3:
                     yield from _complete_fs_path(fragment, self._kinds)
                 return
+
+        # ---- move <entity-path> <new-parent> --------------------------------
+        if cmd == "move":
+            # Both args complete over content/ paths
+            if len(tokens) in (2, 3):
+                yield from _complete_fs_path(fragment, self._content)
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -436,25 +446,86 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
         return
 
 
+def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session: PromptSession) -> None:
+    entity_path = args[0] if len(args) > 0 else None
+    new_parent = args[1] if len(args) > 1 else None
+
+    if entity_path is None:
+        try:
+            default_path = str(cwd.relative_to(content))
+        except ValueError:
+            default_path = ""
+        entity_path = _ask(session, "entity path", _PathCompleter(content), default=default_path)
+        if not entity_path:
+            return
+
+    if new_parent is None:
+        new_parent = _ask(session, "new parent", _PathCompleter(content))
+        if not new_parent:
+            return
+
+    # Resolve relative to cwd first, then content root
+    def _resolve(p: str) -> str:
+        p = p.rstrip("/")
+        if (cwd / p).is_dir():
+            return str((cwd / p).relative_to(content))
+        return p
+
+    entity_path = _resolve(entity_path)
+    new_parent = _resolve(new_parent)
+
+    plan = plan_move(project, entity_path, new_parent)
+
+    if plan.error:
+        print(f"  Error: {plan.error}")
+        return
+
+    print(f"  Move:  content/{plan.old_id}")
+    print(f"    ->  content/{plan.new_id}")
+
+    if plan.refs:
+        print(f"\n  References to update ({len(plan.refs)}):")
+        for ref in plan.refs:
+            rel = ref.file.relative_to(project)
+            print(f"    {rel}:{ref.line_no}")
+            print(f"      - {ref.old_text.strip()}")
+            print(f"      + {ref.new_text.strip()}")
+    else:
+        print("  No references found — only the folder will move.")
+
+    confirm = _ask(session, "\n  Proceed? [y/N]")
+    if not confirm or confirm.lower() not in ("y", "yes"):
+        print("  Cancelled.")
+        return
+
+    try:
+        execute_move(plan)
+        print(f"  Done.  Moved to content/{plan.new_id}")
+    except Exception as exc:
+        print(f"  Error during move: {exc}")
+
+
 def _cmd_help() -> None:
     print(
         """
   Commands
   --------
-  hello                          project stats
-  ls                             list current directory
-  cd <path>                      change directory (relative or from content root)
-  cd ..                          go up one level
-  cd                             go back to content root
-  tree [path]                    show subtree from current dir (or path)
-  add entity <path> <name> <kind>   create entity stub
-  add collection <path> <title>     create collection folder
-  add kind <path> <singular> [plural]  create kind stub
-  help                           show this help
-  exit / quit                    leave the shell
+  hello                                 project stats
+  ls                                    list current directory
+  cd <path>                             change directory (relative or from content root)
+  cd ..                                 go up one level
+  cd                                    go back to content root
+  tree [path]                           show subtree from current dir (or path)
+  add entity <path> <name> <kind>       create entity stub
+  add collection <path> <title>         create collection folder
+  add kind <path> <singular> [plural]   create kind stub
+  move <entity-path> <new-parent>       move entity and rewrite all references
+  help                                  show this help
+  exit / quit                           leave the shell
 
   Tab completion is available for all path and kind arguments.
   Use quotes for names with spaces: add entity places/my-city "My City" planet
+  Any argument can be omitted; the shell will prompt for it.
     """
     )
 
@@ -524,6 +595,8 @@ def run_shell(project: Path) -> None:
             cwd = _cmd_cd(cwd, content, args)
         elif cmd == "add":
             _cmd_add(project, cwd, args, session)
+        elif cmd == "move":
+            _cmd_move(project, cwd, content, args, session)
         elif cmd == "help":
             _cmd_help()
         else:
