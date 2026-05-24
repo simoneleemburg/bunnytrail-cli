@@ -10,6 +10,7 @@ Usage:
     alteria add kind PATH SINGULAR [PLURAL]
     alteria move <entity-path> <new-parent>
     alteria rename <old-path> <new-slug>
+    alteria crosslink <article-path> <namespace-path>
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ import click
 
 from .helpers import (
     content_root,
+    execute_crosslink,
     execute_move,
     execute_rename,
     find_project_root,
@@ -28,6 +30,7 @@ from .helpers import (
     kinds_root,
     list_kinds_tree,
     list_tree,
+    plan_crosslink,
     plan_move,
     plan_rename,
 )
@@ -396,6 +399,76 @@ def move(ctx: click.Context, entity_path: str, new_parent: str, dry_run: bool, y
         sys.exit(1)
 
     click.echo(f"\nDone.  Moved to content/{plan.new_id}")
+
+
+# ---------------------------------------------------------------------------
+# crosslink
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("article_path")
+@click.argument("namespace_path")
+@click.option("--dry-run", is_flag=True, help="Show what would change without touching files.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+@click.pass_context
+def crosslink(
+    ctx: click.Context,
+    article_path: str,
+    namespace_path: str,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Insert wikilinks into ARTICLE_PATH for entities and kinds found in NAMESPACE_PATH.
+
+    ARTICLE_PATH is relative to content/ (e.g. foundation/fabric/nearing).
+    NAMESPACE_PATH is relative to content/ and scopes which entities are
+    candidates for linking (e.g. aurethia/places).
+
+    Two sources of candidates are searched:
+      - Every entity found recursively under content/NAMESPACE_PATH, matched
+        by its display name (name: field).
+      - Every kind in content_meta/kinds/, matched by singular: and plural:.
+
+    Matching is exact and whole-word.  Text already inside [[...]] wikilinks
+    is never re-linked.  Only the first occurrence of each name is linked.
+
+    Use --dry-run to preview every change before committing.
+    """
+    root: Path = ctx.obj["root"]
+
+    plan = plan_crosslink(root, article_path.rstrip("/"), namespace_path.rstrip("/"))
+
+    if plan.error:
+        click.echo(f"Error: {plan.error}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Article:   content/{plan.article_id}")
+    click.echo(f"Namespace: content/{plan.namespace}")
+
+    if not plan.edits:
+        click.echo("\nNo matches found — nothing to link.")
+        return
+
+    click.echo(f"\nProposed wikilinks ({len(plan.edits)} line(s) affected):")
+    for edit in plan.edits:
+        click.echo(f"  line {edit.line_no}:")
+        click.echo(f"    - {edit.old_text.strip()}")
+        click.echo(f"    + {edit.new_text.strip()}")
+
+    if dry_run:
+        click.echo("\n(dry run — no files changed)")
+        return
+
+    if not yes:
+        click.confirm("\nProceed?", abort=True)
+
+    try:
+        execute_crosslink(plan)
+    except Exception as exc:
+        click.echo(f"Error during crosslink: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"\nDone.  Updated content/{plan.article_id}/index.md")
 
 
 # ---------------------------------------------------------------------------

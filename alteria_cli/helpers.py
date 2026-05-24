@@ -245,6 +245,292 @@ def execute_move(plan: MovePlan) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Crosslink — insert wikilinks into an article's prose
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CrosslinkEdit:
+    """A single line replacement that adds one or more wikilinks."""
+    line_no: int        # 1-based
+    old_text: str       # original line (without newline)
+    new_text: str       # replacement line (without newline)
+
+
+@dataclass
+class CrosslinkPlan:
+    """Everything needed to carry out (or preview) a crosslink pass."""
+    article_id: str             # entity id of the article being edited
+    md_file: Path               # absolute path to its index.md
+    namespace: str              # namespace path relative to content/
+    edits: list[CrosslinkEdit] = field(default_factory=list)
+    error: str = ""             # non-empty means the plan is invalid
+
+
+def _parse_yaml_field(lines: list[str], field: str) -> str:
+    """Return the value of a bare scalar YAML field from a list of lines.
+
+    Handles simple ``field: value`` lines and block-scalar headers
+    (``field: >-`` / ``field: |``) by concatenating the indented body.
+    Returns an empty string if the field is absent.
+    """
+    prefix = f"{field}:"
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        rest = stripped[len(prefix):].strip()
+        # Block scalar — collect indented continuation lines
+        if rest in (">-", ">", "|", "|-"):
+            parts: list[str] = []
+            for j in range(i + 1, len(lines)):
+                cont = lines[j]
+                if cont and (cont[0] == " " or cont[0] == "\t"):
+                    parts.append(cont.strip())
+                else:
+                    break
+            return " ".join(parts)
+        # Inline value (may be quoted)
+        return rest.strip("\"'")
+    return ""
+
+
+def collect_namespace_entities(project: Path, namespace_path: str) -> list[tuple[str, str]]:
+    """Return ``(display_name, entity_id)`` for every entity under namespace_path.
+
+    *namespace_path* is relative to ``content/``.
+    Entities with an empty or missing ``name:`` field are skipped.
+    """
+    content = content_root(project).resolve()
+    ns_dir = content / namespace_path
+    if not ns_dir.is_dir():
+        return []
+
+    results: list[tuple[str, str]] = []
+    for yaml_file in sorted(ns_dir.rglob("index.yaml")):
+        entity_dir = yaml_file.parent
+        if not is_entity_folder(entity_dir):
+            continue
+        lines = yaml_file.read_text(encoding="utf-8").splitlines()
+        name = _parse_yaml_field(lines, "name")
+        if not name:
+            continue
+        entity_id = str(entity_dir.relative_to(content))
+        results.append((name, entity_id))
+    return results
+
+
+def collect_all_kinds(project: Path) -> list[tuple[str, str]]:
+    """Return ``(match_text, link_target)`` for every kind's singular and plural.
+
+    *link_target* is ``kinds/<leaf-slug>`` (the slug used in wikilinks).
+    Both the singular and plural of each kind emit separate entries pointing
+    at the same target.  Entries with empty names are skipped.
+    """
+    kinds = kinds_root(project).resolve()
+    results: list[tuple[str, str]] = []
+    for kind_yaml in sorted(kinds.rglob("_kind.yaml")):
+        kind_dir = kind_yaml.parent
+        if not is_kind_folder(kind_dir):
+            continue
+        slug = kind_dir.name
+        target = f"kinds/{slug}"
+        lines = kind_yaml.read_text(encoding="utf-8").splitlines()
+        singular = _parse_yaml_field(lines, "singular")
+        plural = _parse_yaml_field(lines, "plural")
+        if singular:
+            results.append((singular, target))
+        if plural and plural != singular:
+            results.append((plural, target))
+    return results
+
+
+def _wikilink_spans(line: str) -> list[tuple[int, int]]:
+    """Return a list of ``(start, end)`` character ranges that are already
+    inside a ``[[...]]`` wikilink on *line*.  These positions must not be
+    re-linked.
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while i < len(line) - 1:
+        if line[i] == "[" and line[i + 1] == "[":
+            start = i
+            close = line.find("]]", i + 2)
+            if close == -1:
+                break
+            spans.append((start, close + 2))
+            i = close + 2
+        else:
+            i += 1
+    return spans
+
+
+def _is_in_span(pos: int, length: int, spans: list[tuple[int, int]]) -> bool:
+    """Return True if the range [pos, pos+length) overlaps any span."""
+    end = pos + length
+    return any(s < end and e > pos for s, e in spans)
+
+
+def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> CrosslinkPlan:
+    """Build a CrosslinkPlan for inserting wikilinks into *article_path*.
+
+    Candidate link targets are:
+
+    1. All entities found recursively under ``content/<namespace_path>``,
+       matched by their ``name:`` field (exact, whole-word).
+    2. All kinds in ``content_meta/kinds/``, matched by their ``singular:``
+       and ``plural:`` fields (exact, whole-word).
+
+    Rules:
+    - Text already inside ``[[...]]`` is never re-linked.
+    - Only the **first** occurrence of each candidate name in the file
+      is linked.
+    - A whole-word boundary (``\\b``) is required on both sides of the
+      match to avoid partial-word replacements.
+    - The wikilink is written as ``[[target|match_text]]`` to preserve the
+      original capitalisation/form.  Where the target's leaf slug equals
+      the match text, a bare ``[[target]]`` is used instead.
+    """
+    content = content_root(project).resolve()
+    article_dir = (content / article_path).resolve()
+
+    if not article_dir.is_dir():
+        return CrosslinkPlan(
+            article_id=article_path, md_file=article_dir / "index.md",
+            namespace=namespace_path,
+            error=f"article not found: content/{article_path}",
+        )
+    if not is_entity_folder(article_dir):
+        return CrosslinkPlan(
+            article_id=article_path, md_file=article_dir / "index.md",
+            namespace=namespace_path,
+            error=f"not an entity folder (no index.yaml): content/{article_path}",
+        )
+
+    md_file = article_dir / "index.md"
+    if not md_file.is_file():
+        return CrosslinkPlan(
+            article_id=article_path, md_file=md_file,
+            namespace=namespace_path,
+            error=f"article has no index.md: content/{article_path}",
+        )
+
+    ns_dir = content / namespace_path
+    if not ns_dir.is_dir():
+        return CrosslinkPlan(
+            article_id=article_path, md_file=md_file,
+            namespace=namespace_path,
+            error=f"namespace not found: content/{namespace_path}",
+        )
+
+    # ------------------------------------------------------------------
+    # Build candidate list: (match_text, wikilink_target)
+    # Longer names first so "Mundus Frame" is tested before "Mundus".
+    # Exclude the article itself from the candidate pool.
+    # ------------------------------------------------------------------
+    article_id_norm = article_path.rstrip("/")
+    candidates: list[tuple[str, str]] = []
+
+    for name, entity_id in collect_namespace_entities(project, namespace_path):
+        if entity_id == article_id_norm:
+            continue
+        candidates.append((name, entity_id))
+
+    for match_text, kind_target in collect_all_kinds(project):
+        candidates.append((match_text, kind_target))
+
+    # Sort longest-first to prefer specific matches over shorter substrings
+    candidates.sort(key=lambda c: len(c[0]), reverse=True)
+
+    # ------------------------------------------------------------------
+    # Compile patterns (whole-word, case-sensitive)
+    # ------------------------------------------------------------------
+    patterns: list[tuple[re.Pattern[str], str, str]] = []
+    seen_texts: set[str] = set()
+    for match_text, target in candidates:
+        if match_text in seen_texts:
+            continue
+        seen_texts.add(match_text)
+        pat = re.compile(r"\b" + re.escape(match_text) + r"\b")
+        patterns.append((pat, match_text, target))
+
+    # ------------------------------------------------------------------
+    # Walk the article line-by-line; build edits
+    # ------------------------------------------------------------------
+    lines = md_file.read_text(encoding="utf-8").splitlines()
+
+    # Track which candidate names have already been linked (first-only rule)
+    linked_texts: set[str] = set()
+
+    edits: list[CrosslinkEdit] = []
+
+    for line_idx, line in enumerate(lines):
+        new_line = line
+
+        for pat, match_text, target in patterns:
+            if match_text in linked_texts:
+                continue
+
+            # Search new_line (which may already contain earlier replacements
+            # on this line) so that position lookups and span checks are always
+            # consistent with the current state of the string.
+            spans = _wikilink_spans(new_line)
+            m = pat.search(new_line)
+            if m is None:
+                continue
+
+            start = m.start()
+            length = len(match_text)
+
+            # Skip if this occurrence sits inside an existing wikilink
+            if _is_in_span(start, length, spans):
+                continue
+
+            # Build the replacement wikilink.
+            # Use bare [[target]] when the target's last segment equals match_text,
+            # otherwise use [[target|match_text]].
+            target_leaf = target.split("/")[-1]
+            if target_leaf == match_text:
+                replacement = f"[[{target}]]"
+            else:
+                replacement = f"[[{target}|{match_text}]]"
+
+            new_line = new_line[:start] + replacement + new_line[start + length:]
+
+            linked_texts.add(match_text)
+
+        if new_line != line:
+            edits.append(CrosslinkEdit(
+                line_no=line_idx + 1,
+                old_text=line,
+                new_text=new_line,
+            ))
+
+    return CrosslinkPlan(
+        article_id=article_path,
+        md_file=md_file,
+        namespace=namespace_path,
+        edits=edits,
+    )
+
+
+def execute_crosslink(plan: CrosslinkPlan) -> None:
+    """Apply a CrosslinkPlan: rewrite the article's index.md in place."""
+    if plan.error:
+        raise ValueError(f"Cannot execute invalid plan: {plan.error}")
+
+    lines = plan.md_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    for edit in sorted(plan.edits, key=lambda e: e.line_no, reverse=True):
+        idx = edit.line_no - 1
+        ending = ""
+        if lines[idx].endswith("\r\n"):
+            ending = "\r\n"
+        elif lines[idx].endswith("\n"):
+            ending = "\n"
+        lines[idx] = edit.new_text + ending
+    plan.md_file.write_text("".join(lines), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Rename — reference scanning and execution
 # ---------------------------------------------------------------------------
 

@@ -20,6 +20,7 @@ from prompt_toolkit.styles import Style
 
 from .helpers import (
     content_root,
+    execute_crosslink,
     execute_move,
     execute_rename,
     is_entity_folder,
@@ -27,6 +28,7 @@ from .helpers import (
     kinds_root,
     list_kinds_tree,
     list_tree,
+    plan_crosslink,
     plan_move,
     plan_rename,
 )
@@ -53,6 +55,7 @@ TOP_LEVEL_COMMANDS = [
     "add",
     "move",
     "rename",
+    "crosslink",
     "help",
     "exit",
     "quit",
@@ -215,6 +218,12 @@ class AlteriaCompleter(Completer):
                 yield from _complete_fs_path(fragment, self._content)
                 yield from _complete_fs_path(fragment, self._kinds)
             # token 3 is a free-text slug — no completion
+            return
+
+        # ---- crosslink <article-path> <namespace-path> ----------------------
+        if cmd == "crosslink":
+            if len(tokens) in (2, 3):
+                yield from _complete_fs_path(fragment, self._content)
             return
 
 
@@ -590,6 +599,65 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
         print(f"  Error during rename: {exc}")
 
 
+def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], session: PromptSession) -> None:
+    article_path = args[0] if len(args) > 0 else None
+    namespace_path = args[1] if len(args) > 1 else None
+
+    if article_path is None:
+        try:
+            default_path = str(cwd.relative_to(content))
+        except ValueError:
+            default_path = ""
+        article_path = _ask(session, "article path", _PathCompleter(content), default=default_path)
+        if not article_path:
+            return
+
+    if namespace_path is None:
+        namespace_path = _ask(session, "namespace path", _PathCompleter(content))
+        if not namespace_path:
+            return
+
+    # Resolve relative to cwd first, then content root
+    def _resolve(p: str) -> str:
+        p = p.rstrip("/")
+        if (cwd / p).is_dir():
+            return str((cwd / p).relative_to(content))
+        return p
+
+    article_path = _resolve(article_path)
+    namespace_path = _resolve(namespace_path)
+
+    plan = plan_crosslink(project, article_path, namespace_path)
+
+    if plan.error:
+        print(f"  Error: {plan.error}")
+        return
+
+    print(f"  Article:   content/{plan.article_id}")
+    print(f"  Namespace: content/{plan.namespace}")
+
+    if not plan.edits:
+        print("  No matches found — nothing to link.")
+        return
+
+    print(f"\n  Proposed wikilinks ({len(plan.edits)} line(s) affected):")
+    for edit in plan.edits:
+        print(f"    line {edit.line_no}:")
+        print(f"      - {edit.old_text.strip()}")
+        print(f"      + {edit.new_text.strip()}")
+
+    confirm = _ask(session, "\n  Proceed? [y/N]")
+    if not confirm or confirm.lower() not in ("y", "yes"):
+        print("  Cancelled.")
+        return
+
+    try:
+        execute_crosslink(plan)
+        print(f"  Done.  Updated content/{plan.article_id}/index.md")
+    except Exception as exc:
+        print(f"  Error during crosslink: {exc}")
+
+
 def _cmd_help() -> None:
     print(
         """
@@ -606,6 +674,7 @@ def _cmd_help() -> None:
   add kind <path> <singular> [plural]   create kind stub
   move <entity-path> <new-parent>       move entity and rewrite all references
   rename <old-path> <new-slug>          rename entity or kind slug, rewrite all references
+  crosslink <article-path> <namespace>  insert wikilinks into article prose
   help                                  show this help
   exit / quit                           leave the shell
 
@@ -685,6 +754,8 @@ def run_shell(project: Path) -> None:
             _cmd_move(project, cwd, content, args, session)
         elif cmd == "rename":
             _cmd_rename(project, cwd, content, args, session)
+        elif cmd == "crosslink":
+            _cmd_crosslink(project, cwd, content, args, session)
         elif cmd == "help":
             _cmd_help()
         else:
