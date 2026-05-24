@@ -30,6 +30,7 @@ from .helpers import (
     list_tree,
     plan_crosslink,
     plan_move,
+    plan_move_kind,
     plan_rename,
 )
 
@@ -206,9 +207,14 @@ class AlteriaCompleter(Completer):
 
         # ---- move <entity-path> <new-parent> --------------------------------
         if cmd == "move":
-            # Both args complete over content/ paths
-            if len(tokens) in (2, 3):
-                yield from _complete_fs_path(fragment, self._content)
+            # --kind flag switches completion base to kinds/
+            has_kind_flag = "--kind" in tokens
+            base = self._kinds if has_kind_flag else self._content
+            # Count non-flag tokens to determine which positional arg we're on
+            pos_tokens = [t for t in tokens[1:] if not t.startswith("-")]
+            pos_count = len(pos_tokens) + (1 if trailing_space else 0)
+            if pos_count in (1, 2):
+                yield from _complete_fs_path(fragment, base)
             return
 
         # ---- rename <old-path> <new-slug> -----------------------------------
@@ -468,41 +474,66 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
 
 
 def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session: PromptSession) -> None:
+    kinds = kinds_root(project)
+
+    # Parse --kind flag out of args
+    is_kind = "--kind" in args
+    args = [a for a in args if a != "--kind"]
+
     entity_path = args[0] if len(args) > 0 else None
     new_parent = args[1] if len(args) > 1 else None
 
+    base = kinds if is_kind else content
+    base_label = "kinds path" if is_kind else "entity path"
+    parent_label = "new kinds parent" if is_kind else "new parent"
+
     if entity_path is None:
-        try:
-            default_path = str(cwd.relative_to(content))
-        except ValueError:
-            default_path = ""
-        entity_path = _ask(session, "entity path", _PathCompleter(content), default=default_path)
+        if is_kind:
+            entity_path = _ask(session, base_label, _PathCompleter(base))
+        else:
+            try:
+                default_path = str(cwd.relative_to(content))
+            except ValueError:
+                default_path = ""
+            entity_path = _ask(session, base_label, _PathCompleter(base), default=default_path)
         if not entity_path:
             return
 
     if new_parent is None:
-        new_parent = _ask(session, "new parent", _PathCompleter(content))
+        new_parent = _ask(session, parent_label, _PathCompleter(base))
         if not new_parent:
             return
 
-    # Resolve relative to cwd first, then content root
-    def _resolve(p: str) -> str:
+    # Resolve relative to cwd (content only; kinds paths are always absolute-style)
+    def _resolve_content(p: str) -> str:
         p = p.rstrip("/")
         if (cwd / p).is_dir():
             return str((cwd / p).relative_to(content))
         return p
 
-    entity_path = _resolve(entity_path)
-    new_parent = _resolve(new_parent)
+    def _resolve_kinds(p: str) -> str:
+        p = p.rstrip("/")
+        if (base / p).is_dir():
+            return str((base / p).relative_to(kinds))
+        return p
 
-    plan = plan_move(project, entity_path, new_parent)
+    if is_kind:
+        entity_path = _resolve_kinds(entity_path)
+        new_parent = _resolve_kinds(new_parent)
+        plan = plan_move_kind(project, entity_path, new_parent)
+        id_root = "content_meta/kinds"
+    else:
+        entity_path = _resolve_content(entity_path)
+        new_parent = _resolve_content(new_parent)
+        plan = plan_move(project, entity_path, new_parent)
+        id_root = "content"
 
     if plan.error:
         print(f"  Error: {plan.error}")
         return
 
-    print(f"  Move:  content/{plan.old_id}")
-    print(f"    ->  content/{plan.new_id}")
+    print(f"  Move:  {id_root}/{plan.old_id}")
+    print(f"    ->  {id_root}/{plan.new_id}")
 
     if plan.refs:
         print(f"\n  References to update ({len(plan.refs)}):")
@@ -512,7 +543,10 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session:
             print(f"      - {ref.old_text.strip()}")
             print(f"      + {ref.new_text.strip()}")
     else:
-        print("  No references found — only the folder will move.")
+        if is_kind:
+            print("  No reference rewrites needed (kinds are referenced by slug).")
+        else:
+            print("  No references found — only the folder will move.")
 
     confirm = _ask(session, "\n  Proceed? [y/N]")
     if not confirm or confirm.lower() not in ("y", "yes"):
@@ -521,7 +555,7 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session:
 
     try:
         execute_move(plan)
-        print(f"  Done.  Moved to content/{plan.new_id}")
+        print(f"  Done.  Moved to {id_root}/{plan.new_id}")
     except Exception as exc:
         print(f"  Error during move: {exc}")
 
@@ -673,6 +707,7 @@ def _cmd_help() -> None:
   add collection <path> <title>         create collection folder
   add kind <path> <singular> [plural]   create kind stub
   move <entity-path> <new-parent>       move entity and rewrite all references
+  move --kind <kind-path> <new-parent>  move kind within content_meta/kinds/ (no ref rewrites)
   rename <old-path> <new-slug>          rename entity or kind slug, rewrite all references
   crosslink <article-path> <namespace>  insert wikilinks into article prose
   help                                  show this help

@@ -32,6 +32,7 @@ from .helpers import (
     list_tree,
     plan_crosslink,
     plan_move,
+    plan_move_kind,
     plan_rename,
 )
 
@@ -350,30 +351,42 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
 @cli.command()
 @click.argument("entity_path")
 @click.argument("new_parent")
+@click.option("--kind", "is_kind", is_flag=True, help="Move a kind instead of a content entity.")
 @click.option("--dry-run", is_flag=True, help="Show what would change without touching files.")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
 @click.pass_context
-def move(ctx: click.Context, entity_path: str, new_parent: str, dry_run: bool, yes: bool) -> None:
-    """Move an entity to a new parent collection and update all references.
+def move(ctx: click.Context, entity_path: str, new_parent: str, is_kind: bool, dry_run: bool, yes: bool) -> None:
+    """Move an entity (or kind) to a new parent and update all references.
 
-    ENTITY_PATH is relative to content/ (e.g. aurethia/places/old/myplace).
-    NEW_PARENT  is the destination collection, also relative to content/
-                (e.g. aurethia/places/new-home).
+    Without --kind:
+      ENTITY_PATH is relative to content/ (e.g. aurethia/places/old/myplace).
+      NEW_PARENT  is the destination collection, also relative to content/.
+      All target: relations and full-path wikilinks are rewritten automatically.
 
-    The entity slug (folder name) is preserved.  All target: relations and
-    full-path wikilinks across the project are rewritten automatically.
+    With --kind:
+      ENTITY_PATH is relative to content_meta/kinds/ (e.g. being/human).
+      NEW_PARENT  is also relative to content_meta/kinds/ (e.g. being/mortal).
+      Because wikilinks and kind: fields reference kinds by slug only,
+      no reference rewrites are needed — only the folder is moved.
+
+    The slug (folder name) is always preserved.
     Use --dry-run to preview every change before committing.
     """
     root: Path = ctx.obj["root"]
 
-    plan = plan_move(root, entity_path.rstrip("/"), new_parent.rstrip("/"))
+    if is_kind:
+        plan = plan_move_kind(root, entity_path.rstrip("/"), new_parent.rstrip("/"))
+        id_root = "content_meta/kinds"
+    else:
+        plan = plan_move(root, entity_path.rstrip("/"), new_parent.rstrip("/"))
+        id_root = "content"
 
     if plan.error:
         click.echo(f"Error: {plan.error}", err=True)
         sys.exit(1)
 
-    click.echo(f"Move:  content/{plan.old_id}")
-    click.echo(f"  ->  content/{plan.new_id}")
+    click.echo(f"Move:  {id_root}/{plan.old_id}")
+    click.echo(f"  ->  {id_root}/{plan.new_id}")
 
     if plan.refs:
         click.echo(f"\nReferences to update ({len(plan.refs)}):")
@@ -383,7 +396,10 @@ def move(ctx: click.Context, entity_path: str, new_parent: str, dry_run: bool, y
             click.echo(f"    - {ref.old_text.strip()}")
             click.echo(f"    + {ref.new_text.strip()}")
     else:
-        click.echo("\nNo references found — only the folder will move.")
+        if is_kind:
+            click.echo("\nNo reference rewrites needed (kinds are referenced by slug).")
+        else:
+            click.echo("\nNo references found — only the folder will move.")
 
     if dry_run:
         click.echo("\n(dry run — no files changed)")
@@ -398,7 +414,7 @@ def move(ctx: click.Context, entity_path: str, new_parent: str, dry_run: bool, y
         click.echo(f"Error during move: {exc}", err=True)
         sys.exit(1)
 
-    click.echo(f"\nDone.  Moved to content/{plan.new_id}")
+    click.echo(f"\nDone.  Moved to {id_root}/{plan.new_id}")
 
 
 # ---------------------------------------------------------------------------

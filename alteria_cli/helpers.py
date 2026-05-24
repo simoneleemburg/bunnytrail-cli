@@ -103,10 +103,11 @@ class MoveRef:
 @dataclass
 class MovePlan:
     """Everything needed to carry out (or preview) a move."""
-    old_id: str                     # entity id before move  (e.g. aurethia/places/old/myplace)
-    new_id: str                     # entity id after move
-    old_dir: Path                   # absolute path of entity folder before move
-    new_dir: Path                   # absolute path of entity folder after move
+    old_id: str                     # entity/kind id before move
+    new_id: str                     # entity/kind id after move
+    old_dir: Path                   # absolute path of folder before move
+    new_dir: Path                   # absolute path of folder after move
+    is_kind: bool = False           # True when moving a kind under content_meta/kinds/
     refs: list[MoveRef] = field(default_factory=list)
     error: str = ""                 # non-empty means the plan is invalid
 
@@ -206,11 +207,71 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
     )
 
 
+def plan_move_kind(project: Path, kind_path: str, new_parent: str) -> MovePlan:
+    """
+    Build a MovePlan for moving a kind folder under a new parent within
+    content_meta/kinds/.
+
+    *kind_path* and *new_parent* are both relative to content_meta/kinds/.
+    The kind slug (folder name) is preserved; only the parent changes.
+
+    Because wikilinks and kind: fields reference kinds by leaf slug only
+    (not by their full path), **no reference files need to be rewritten**
+    when a kind moves.  The plan will always have an empty refs list; the
+    only action taken is the physical folder move.
+    """
+    kinds = kinds_root(project).resolve()
+
+    old_dir = (kinds / kind_path).resolve()
+    if not old_dir.is_dir():
+        return MovePlan(
+            old_id=kind_path, new_id="", old_dir=old_dir, new_dir=old_dir,
+            is_kind=True,
+            error=f"kind not found: content_meta/kinds/{kind_path}",
+        )
+    if not is_kind_folder(old_dir):
+        return MovePlan(
+            old_id=kind_path, new_id="", old_dir=old_dir, new_dir=old_dir,
+            is_kind=True,
+            error=f"not a kind folder (no _kind.yaml): content_meta/kinds/{kind_path}",
+        )
+
+    slug = old_dir.name
+    new_parent_dir = (kinds / new_parent).resolve()
+    new_dir = new_parent_dir / slug
+    old_id = kind_path.rstrip("/")
+    new_id = str(new_dir.relative_to(kinds))
+
+    if new_dir == old_dir:
+        return MovePlan(
+            old_id=old_id, new_id=new_id, old_dir=old_dir, new_dir=new_dir,
+            is_kind=True,
+            error="source and destination are the same",
+        )
+    if new_dir.exists():
+        return MovePlan(
+            old_id=old_id, new_id=new_id, old_dir=old_dir, new_dir=new_dir,
+            is_kind=True,
+            error=f"destination already exists: content_meta/kinds/{new_id}",
+        )
+
+    # No references to rewrite — slug-based references are unaffected by
+    # a structural move within the kinds tree.
+    return MovePlan(
+        old_id=old_id,
+        new_id=new_id,
+        old_dir=old_dir,
+        new_dir=new_dir,
+        is_kind=True,
+        refs=[],
+    )
+
+
 def execute_move(plan: MovePlan) -> None:
     """
     Apply a MovePlan:
-      1. Rewrite all reference files in place.
-      2. Move the entity folder.
+      1. Rewrite all reference files in place (entity moves only).
+      2. Move the folder (entity or kind).
 
     Raises on any filesystem error.  Reference rewrites happen before the
     folder move so that a partial failure is recoverable (the folder is
