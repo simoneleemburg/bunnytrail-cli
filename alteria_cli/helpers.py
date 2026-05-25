@@ -39,6 +39,10 @@ def kinds_root(project: Path) -> Path:
     return project / "content_meta" / "kinds"
 
 
+def assets_root(project: Path) -> Path:
+    return project / "assets"
+
+
 # ---------------------------------------------------------------------------
 # Tree helpers
 # ---------------------------------------------------------------------------
@@ -197,6 +201,27 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
                     old_text=line,
                     new_text=new_line,
                 ))
+
+    # --- scan SVG files in assets/ for href="/<old_id>" links --------------
+    # SVG links use a leading slash: <a href="/foundation/fabric/mundus" />
+    svg_href_re = re.compile(
+        r'(?P<pre>href=")/' + re.escape(old_id) + r'(?P<post>["/\s])'
+    )
+    assets = assets_root(project)
+    if assets.is_dir():
+        for svg_file in assets.rglob("*.svg"):
+            lines = svg_file.read_text(encoding="utf-8").splitlines()
+            for i, line in enumerate(lines, start=1):
+                if svg_href_re.search(line):
+                    new_line = svg_href_re.sub(
+                        r"\g<pre>/" + new_id + r"\g<post>", line
+                    )
+                    refs.append(MoveRef(
+                        file=svg_file,
+                        line_no=i,
+                        old_text=line,
+                        new_text=new_line,
+                    ))
 
     return MovePlan(
         old_id=old_id,
@@ -751,6 +776,21 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
                 if wikilink_re.search(line):
                     new_line = wikilink_re.sub(r"[[" + new_id + r"\g<rest>", line)
                     refs.append(MoveRef(md_file, i, line, new_line))
+
+        # 3. href="/<old-id>..." links in SVG files under assets/
+        svg_href_re = re.compile(
+            r'(?P<pre>href=")/' + re.escape(old_id) + r'(?P<post>["/\s])'
+        )
+        assets = assets_root(project)
+        if assets.is_dir():
+            for svg_file in assets.rglob("*.svg"):
+                lines = svg_file.read_text(encoding="utf-8").splitlines()
+                for i, line in enumerate(lines, start=1):
+                    if svg_href_re.search(line):
+                        new_line = svg_href_re.sub(
+                            r"\g<pre>/" + new_id + r"\g<post>", line
+                        )
+                        refs.append(MoveRef(svg_file, i, line, new_line))
 
     return RenamePlan(
         old_id=old_id,
