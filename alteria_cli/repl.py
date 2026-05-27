@@ -24,7 +24,8 @@ from .helpers import (
     execute_move,
     execute_rename,
     is_entity_folder,
-    is_kind_folder,
+    iter_entity_md_files,
+    iter_kind_md_files,
     kinds_root,
     list_kinds_tree,
     list_tree,
@@ -32,6 +33,7 @@ from .helpers import (
     plan_move,
     plan_move_kind,
     plan_rename,
+    write_frontmatter_md,
 )
 
 # ---------------------------------------------------------------------------
@@ -115,7 +117,7 @@ def _complete_fs_path(
 def _all_kind_ids(kinds_base: Path) -> list[str]:
     """Return every kind folder name (leaf slug) found under *kinds_base*."""
     ids: list[str] = []
-    for p in sorted(kinds_base.rglob("_kind.yaml")):
+    for p in sorted(kinds_base.rglob("_kind.md")):
         ids.append(p.parent.name)
     return ids
 
@@ -273,12 +275,8 @@ def _ask(
 def _cmd_hello(project: Path) -> None:
     content = content_root(project)
     kinds = kinds_root(project)
-    entity_count = sum(
-        1 for p in content.rglob("index.yaml") if is_entity_folder(p.parent)
-    )
-    kind_count = sum(
-        1 for p in kinds.rglob("_kind.yaml") if is_kind_folder(p.parent)
-    )
+    entity_count = sum(1 for _ in iter_entity_md_files(content))
+    kind_count = sum(1 for _ in iter_kind_md_files(kinds))
     print(f"Project root : {project}")
     print(f"Entities     : {entity_count}")
     print(f"Kinds        : {kind_count}")
@@ -288,12 +286,18 @@ def _cmd_ls(cwd: Path, content: Path) -> None:
     rel = cwd.relative_to(content)
     print(f"  {content.name}/{rel}" if str(rel) != "." else f"  {content.name}/")
     for child in sorted(cwd.iterdir()):
-        if child.name.startswith(".") or child.name.startswith("_"):
+        if child.name.startswith("."):
+            continue
+        # Hide internal underscore-files except the structural markers
+        # the user is likely to care about.
+        if child.name.startswith("_") and child.name not in (
+            "_collection.md",
+        ):
             continue
         if child.is_dir():
             marker = "[E]" if is_entity_folder(child) else "[C]"
             print(f"  {marker} {child.name}/")
-        elif child.suffix in (".yaml", ".md"):
+        elif child.suffix == ".md":
             print(f"       {child.name}")
 
 
@@ -390,11 +394,10 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
             entity_slug = name.lower().replace(" ", "-")
             entity_dir = raw_dir / entity_slug
 
-        yaml_file = entity_dir / "index.yaml"
         md_file = entity_dir / "index.md"
 
-        if yaml_file.exists():
-            print(f"  already exists: {yaml_file.relative_to(project)}")
+        if md_file.exists():
+            print(f"  already exists: {md_file.relative_to(project)}")
             return
 
         kind_id = kind_arg.split("/")[-1]
@@ -402,9 +405,7 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
             print(f"  warning: no kind '{kind_id}' found under content_meta/kinds/")
 
         entity_dir.mkdir(parents=True, exist_ok=True)
-        yaml_file.write_text(f"name: {name}\nkind: {kind_id}\n", encoding="utf-8")
-        md_file.write_text("", encoding="utf-8")
-        print(f"  created {yaml_file.relative_to(project)}")
+        write_frontmatter_md(md_file, f"name: {name}\nkind: {kind_id}")
         print(f"  created {md_file.relative_to(project)}")
         return
 
@@ -432,13 +433,13 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
         if not coll_dir.is_relative_to(content):
             coll_dir = content / path
 
-        yaml_file = coll_dir / "_collection.yaml"
-        if yaml_file.exists():
-            print(f"  already exists: {yaml_file.relative_to(project)}")
+        md_file = coll_dir / "_collection.md"
+        if md_file.exists():
+            print(f"  already exists: {md_file.relative_to(project)}")
             return
         coll_dir.mkdir(parents=True, exist_ok=True)
-        yaml_file.write_text(f"title: {title}\n", encoding="utf-8")
-        print(f"  created {yaml_file.relative_to(project)}")
+        write_frontmatter_md(md_file, f"title: {title}")
+        print(f"  created {md_file.relative_to(project)}")
         return
 
     # ---- add kind <path> <singular> [plural] -------------------------------
@@ -463,13 +464,13 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
                 plural = f"{singular}s"
 
         kind_dir = kinds / path.rstrip("/")
-        yaml_file = kind_dir / "_kind.yaml"
-        if yaml_file.exists():
-            print(f"  already exists: {yaml_file.relative_to(project)}")
+        md_file = kind_dir / "_kind.md"
+        if md_file.exists():
+            print(f"  already exists: {md_file.relative_to(project)}")
             return
         kind_dir.mkdir(parents=True, exist_ok=True)
-        yaml_file.write_text(f"singular: {singular}\nplural: {plural}\n", encoding="utf-8")
-        print(f"  created {yaml_file.relative_to(project)}")
+        write_frontmatter_md(md_file, f"singular: {singular}\nplural: {plural}")
+        print(f"  created {md_file.relative_to(project)}")
         return
 
 

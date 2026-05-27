@@ -11,6 +11,12 @@ Usage:
     alteria move <entity-path> <new-parent>
     alteria rename <old-path> <new-slug>
     alteria crosslink <article-path> <namespace-path>
+
+All entities, collections, and kinds are authored as a single
+Markdown file with YAML frontmatter (``index.md``,
+``_collection.md``, ``_kind.md``). The CLI writes that shape; the
+legacy split layout (separate ``index.yaml`` + ``index.md``) is no
+longer supported.
 """
 from __future__ import annotations
 
@@ -25,8 +31,8 @@ from .helpers import (
     execute_move,
     execute_rename,
     find_project_root,
-    is_entity_folder,
-    is_kind_folder,
+    iter_entity_md_files,
+    iter_kind_md_files,
     kinds_root,
     list_kinds_tree,
     list_tree,
@@ -34,6 +40,7 @@ from .helpers import (
     plan_move,
     plan_move_kind,
     plan_rename,
+    write_frontmatter_md,
 )
 
 
@@ -69,12 +76,8 @@ def hello(ctx: click.Context) -> None:
     content = content_root(root)
     kinds = kinds_root(root)
 
-    entity_count = sum(
-        1 for p in content.rglob("index.yaml") if is_entity_folder(p.parent)
-    )
-    kind_count = sum(
-        1 for p in kinds.rglob("_kind.yaml") if is_kind_folder(p.parent)
-    )
+    entity_count = sum(1 for _ in iter_entity_md_files(content))
+    kind_count = sum(1 for _ in iter_kind_md_files(kinds))
     click.echo(f"Entities found: {entity_count}")
     click.echo(f"Kinds found:    {kind_count}")
 
@@ -159,15 +162,16 @@ def add_entity(
     'aurethia/places/celestial/mynewplace'.
     NAME is the display name.
     KIND must match a folder under content_meta/kinds/.
+
+    Writes a single ``index.md`` with YAML frontmatter at the top.
     """
     root: Path = ctx.obj["root"]
     entity_dir = content_root(root) / path
-    yaml_file = entity_dir / "index.yaml"
     md_file = entity_dir / "index.md"
 
-    if yaml_file.exists() and not force:
+    if md_file.exists() and not force:
         click.echo(
-            f"Error: '{yaml_file}' already exists.  Use --force to overwrite.",
+            f"Error: '{md_file}' already exists.  Use --force to overwrite.",
             err=True,
         )
         sys.exit(1)
@@ -182,25 +186,19 @@ def add_entity(
 
     entity_dir.mkdir(parents=True, exist_ok=True)
 
-    yaml_lines = [
-        f"name: {name}\n",
-        f"kind: {kind_id}\n",
-    ]
+    fm_lines = [f"name: {name}", f"kind: {kind_id}"]
     if summary:
-        yaml_lines.append(f"summary: {summary}\n")
+        fm_lines.append(f"summary: {summary}")
+    write_frontmatter_md(md_file, "\n".join(fm_lines))
 
-    yaml_file.write_text("".join(yaml_lines), encoding="utf-8")
-    md_file.write_text("", encoding="utf-8")  # empty prose stub
-
-    click.echo(f"Created entity stub: {yaml_file.relative_to(root)}")
-    click.echo(f"Created prose stub:  {md_file.relative_to(root)}")
+    click.echo(f"Created entity stub: {md_file.relative_to(root)}")
 
 
 @add.command("collection")
 @click.argument("path")
 @click.argument("title")
 @click.option("--description", default="", help="Optional description.")
-@click.option("--force", is_flag=True, help="Overwrite existing _collection.yaml.")
+@click.option("--force", is_flag=True, help="Overwrite existing _collection.md.")
 @click.pass_context
 def add_collection(
     ctx: click.Context,
@@ -212,26 +210,28 @@ def add_collection(
     """Create a new collection folder at content/PATH.
 
     PATH is relative to content/, e.g. 'aurethia/places'.
+
+    Writes a ``_collection.md`` with YAML frontmatter
+    (``title:``, optional ``description:``).
     """
     root: Path = ctx.obj["root"]
     coll_dir = content_root(root) / path
-    yaml_file = coll_dir / "_collection.yaml"
+    md_file = coll_dir / "_collection.md"
 
-    if yaml_file.exists() and not force:
+    if md_file.exists() and not force:
         click.echo(
-            f"Error: '{yaml_file}' already exists.  Use --force to overwrite.",
+            f"Error: '{md_file}' already exists.  Use --force to overwrite.",
             err=True,
         )
         sys.exit(1)
 
     coll_dir.mkdir(parents=True, exist_ok=True)
 
-    lines = [f"title: {title}\n"]
+    fm_lines = [f"title: {title}"]
     if description:
-        lines.append(f"description: {description}\n")
-
-    yaml_file.write_text("".join(lines), encoding="utf-8")
-    click.echo(f"Created collection: {yaml_file.relative_to(root)}")
+        fm_lines.append(f"description: {description}")
+    write_frontmatter_md(md_file, "\n".join(fm_lines))
+    click.echo(f"Created collection: {md_file.relative_to(root)}")
 
 
 @add.command("kind")
@@ -239,7 +239,7 @@ def add_collection(
 @click.argument("singular")
 @click.argument("plural", required=False, default="")
 @click.option("--description", default="", help="Short description of the kind.")
-@click.option("--force", is_flag=True, help="Overwrite existing _kind.yaml.")
+@click.option("--force", is_flag=True, help="Overwrite existing _kind.md.")
 @click.pass_context
 def add_kind(
     ctx: click.Context,
@@ -254,14 +254,16 @@ def add_kind(
     PATH is relative to content_meta/kinds/, e.g. 'being/mortal/elf'.
     SINGULAR is the singular display name.
     PLURAL defaults to SINGULAR + 's' if omitted.
+
+    Writes a ``_kind.md`` with YAML frontmatter.
     """
     root: Path = ctx.obj["root"]
     kind_dir = kinds_root(root) / path
-    yaml_file = kind_dir / "_kind.yaml"
+    md_file = kind_dir / "_kind.md"
 
-    if yaml_file.exists() and not force:
+    if md_file.exists() and not force:
         click.echo(
-            f"Error: '{yaml_file}' already exists.  Use --force to overwrite.",
+            f"Error: '{md_file}' already exists.  Use --force to overwrite.",
             err=True,
         )
         sys.exit(1)
@@ -269,15 +271,11 @@ def add_kind(
     kind_dir.mkdir(parents=True, exist_ok=True)
 
     plural_val = plural or f"{singular}s"
-    lines = [
-        f"singular: {singular}\n",
-        f"plural: {plural_val}\n",
-    ]
+    fm_lines = [f"singular: {singular}", f"plural: {plural_val}"]
     if description:
-        lines.append(f"description: {description}\n")
-
-    yaml_file.write_text("".join(lines), encoding="utf-8")
-    click.echo(f"Created kind stub: {yaml_file.relative_to(root)}")
+        fm_lines.append(f"description: {description}")
+    write_frontmatter_md(md_file, "\n".join(fm_lines))
+    click.echo(f"Created kind stub: {md_file.relative_to(root)}")
 
 
 # ---------------------------------------------------------------------------
@@ -299,9 +297,11 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
 
     NEW_SLUG is the new folder name only — no slashes.
 
-    For entities, updates: target: relations and full-path wikilinks.
+    For entities, updates: target: relations and full-path wikilinks
+    inside any entity's index.md (frontmatter + body), and SVG href
+    links under assets/.
     For kinds, updates: kind: fields, kinds/<slug> affinity fields,
-    and [[kinds/<slug>...]] wikilinks.
+    and [[kinds/<slug>...]] wikilinks — all inside entities' index.md.
 
     Use --dry-run to preview every change before committing.
     """

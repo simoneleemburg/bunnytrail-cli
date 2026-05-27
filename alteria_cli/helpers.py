@@ -1,6 +1,16 @@
 """
 helpers.py — shared utilities for locating project roots and reading
 content/content_meta structure without loading every file.
+
+All entities, collections, and kinds are now authored as a single
+Markdown file with YAML frontmatter:
+
+    content/<...path>/<slug>/index.md       — entity (frontmatter + prose)
+    content/<...path>/<slug>/_collection.md — collection marker
+    content_meta/kinds/<...path>/<kind>/_kind.md — kind marker
+
+The legacy split layout (`index.yaml` + `index.md`) is no longer
+supported.
 """
 from __future__ import annotations
 
@@ -44,6 +54,70 @@ def assets_root(project: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Frontmatter parsing
+# ---------------------------------------------------------------------------
+
+# A frontmatter block opens with `---` on the first line of the file
+# and closes with another `---` on its own line later. The closing
+# fence's preceding newline ends the YAML; the body starts after it.
+_FRONTMATTER_OPEN = re.compile(r"\A---[ \t]*\r?\n")
+_FRONTMATTER_CLOSE = re.compile(r"^---[ \t]*(?:\r?\n|\Z)", re.MULTILINE)
+
+
+def split_frontmatter(text: str) -> tuple[str | None, str]:
+    """Split a Markdown document into ``(frontmatter, body)``.
+
+    Returns ``(None, text)`` when no opening fence is present, or when
+    a closing fence cannot be found later in the file (we treat that
+    case as plain markdown — the leading ``---`` is a horizontal rule).
+
+    The frontmatter string excludes the fences themselves; the body
+    excludes the closing fence and the newline that follows it.
+    """
+    open_match = _FRONTMATTER_OPEN.match(text)
+    if not open_match:
+        return None, text
+    after = text[open_match.end():]
+    close_match = _FRONTMATTER_CLOSE.search(after)
+    if not close_match:
+        return None, text
+    frontmatter = after[: close_match.start()]
+    body = after[close_match.end():]
+    return frontmatter, body
+
+
+def frontmatter_lines(text: str) -> list[str]:
+    """Return the frontmatter portion of *text* as a list of lines.
+
+    Lines do not include trailing newlines. Returns an empty list
+    when the file has no frontmatter — callers that depend on
+    metadata should handle that as "no fields".
+    """
+    fm, _ = split_frontmatter(text)
+    if fm is None:
+        return []
+    return fm.splitlines()
+
+
+def write_frontmatter_md(
+    path: Path,
+    frontmatter: str,
+    body: str = "",
+) -> None:
+    """Write a Markdown file with the given frontmatter and body.
+
+    *frontmatter* must already be valid YAML (no leading/trailing
+    fences). It will be inserted between ``---`` fences. A blank line
+    separates the closing fence from the body when *body* is
+    non-empty.
+    """
+    fm = frontmatter.rstrip("\n")
+    body_text = body.lstrip("\n")
+    sep = "\n\n" if body_text else "\n"
+    path.write_text(f"---\n{fm}\n---{sep}{body_text}", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Tree helpers
 # ---------------------------------------------------------------------------
 
@@ -53,13 +127,34 @@ def iter_collections(base: Path) -> list[Path]:
 
 
 def is_entity_folder(path: Path) -> bool:
-    """An entity folder contains an index.yaml."""
-    return (path / "index.yaml").is_file()
+    """An entity folder contains an ``index.md`` with frontmatter."""
+    md = path / "index.md"
+    if not md.is_file():
+        return False
+    try:
+        head = md.open("r", encoding="utf-8").read(8)
+    except OSError:
+        return False
+    # An entity must declare metadata; that means a frontmatter fence.
+    return head.startswith("---\n") or head.startswith("---\r\n") or head.startswith("---")
 
 
 def is_kind_folder(path: Path) -> bool:
-    """A kind folder contains a _kind.yaml."""
-    return (path / "_kind.yaml").is_file()
+    """A kind folder is identified by either:
+
+      - the presence of a ``_kind.md`` file (with or without
+        frontmatter — the folder existing is enough), or
+      - simply being a sub-directory of ``content_meta/kinds/``.
+
+    Callers that need to distinguish between "registered with a
+    `_kind.md`" and "implicit" should check for the file directly.
+    """
+    return (path / "_kind.md").is_file()
+
+
+def is_collection_folder(path: Path) -> bool:
+    """A collection folder carries a ``_collection.md`` marker."""
+    return (path / "_collection.md").is_file()
 
 
 def list_tree(base: Path, indent: int = 0, max_depth: int = 4) -> list[str]:
@@ -92,6 +187,23 @@ def list_kinds_tree(base: Path, indent: int = 0) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# File enumeration
+# ---------------------------------------------------------------------------
+
+def iter_entity_md_files(content: Path):
+    """Yield every ``index.md`` that marks an entity folder."""
+    for md_file in content.rglob("index.md"):
+        if is_entity_folder(md_file.parent):
+            yield md_file
+
+
+def iter_kind_md_files(kinds: Path):
+    """Yield every ``_kind.md`` under the kinds tree."""
+    for md_file in kinds.rglob("_kind.md"):
+        yield md_file
+
+
+# ---------------------------------------------------------------------------
 # Move — reference scanning and execution
 # ---------------------------------------------------------------------------
 
@@ -116,6 +228,64 @@ class MovePlan:
     error: str = ""                 # non-empty means the plan is invalid
 
 
+def _scan_entity_refs(
+    project: Path,
+    old_id: str,
+    new_id: str,
+) -> list[MoveRef]:
+    """Find every reference to *old_id* across the project and produce
+    rewrite operations targeting *new_id*.
+
+    References are looked for in:
+      - ``target: <old-id>`` lines in any entity's ``index.md``
+        (these naturally sit inside the YAML frontmatter, but the
+        regex matches anywhere because ``target:`` only occurs in
+        YAML in practice).
+      - ``[[<old-id>...]]`` wikilinks in any entity's ``index.md``
+        body.
+      - ``href="/<old-id>...`` links in any SVG file under
+        ``assets/``.
+    """
+    content = content_root(project).resolve()
+    refs: list[MoveRef] = []
+
+    target_re = re.compile(
+        r"^(?P<prefix>\s*target:\s*)(?P<id>" + re.escape(old_id) + r")(?P<suffix>.*)$"
+    )
+    wikilink_re = re.compile(
+        r"\[\[" + re.escape(old_id) + r"(?P<rest>[|\]#])"
+    )
+
+    for md_file in iter_entity_md_files(content):
+        lines = md_file.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines, start=1):
+            m = target_re.match(line)
+            if m:
+                new_line = m.group("prefix") + new_id + m.group("suffix")
+                refs.append(MoveRef(md_file, i, line, new_line))
+                continue
+            if wikilink_re.search(line):
+                new_line = wikilink_re.sub(r"[[" + new_id + r"\g<rest>", line)
+                refs.append(MoveRef(md_file, i, line, new_line))
+
+    # SVG href links use a leading slash: <a href="/foundation/fabric/mundus" />
+    svg_href_re = re.compile(
+        r'(?P<pre>href=")/' + re.escape(old_id) + r'(?P<post>["/\s])'
+    )
+    assets = assets_root(project)
+    if assets.is_dir():
+        for svg_file in assets.rglob("*.svg"):
+            lines = svg_file.read_text(encoding="utf-8").splitlines()
+            for i, line in enumerate(lines, start=1):
+                if svg_href_re.search(line):
+                    new_line = svg_href_re.sub(
+                        r"\g<pre>/" + new_id + r"\g<post>", line
+                    )
+                    refs.append(MoveRef(svg_file, i, line, new_line))
+
+    return refs
+
+
 def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
     """
     Build a MovePlan for moving *entity_path* under *new_parent*.
@@ -123,12 +293,8 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
     *entity_path* and *new_parent* are both relative to content/.
     The entity slug (folder name) is preserved; only the parent changes.
 
-    Scans the whole project for:
-      - ``target: <old-id>`` lines in any index.yaml
-      - ``[[<old-id>`` wikilink openings in any index.md
-
-    Does NOT touch bare / partial wikilinks — those are resolved by the
-    loader and don't embed the full path.
+    Scans the whole project for ``target:`` and full-path wikilinks
+    referring to the old id, plus SVG ``href`` links under ``assets/``.
     """
     content = content_root(project).resolve()
 
@@ -141,7 +307,7 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
     if not is_entity_folder(old_dir):
         return MovePlan(
             old_id=entity_path, new_id="", old_dir=old_dir, new_dir=old_dir,
-            error=f"not an entity folder (no index.yaml): content/{entity_path}",
+            error=f"not an entity folder (no index.md with frontmatter): content/{entity_path}",
         )
 
     slug = old_dir.name
@@ -161,67 +327,7 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
             error=f"destination already exists: content/{new_id}",
         )
 
-    refs: list[MoveRef] = []
-
-    # --- scan index.yaml files for target: <old_id> ------------------------
-    # Match lines like:  "    target: aurethia/places/old/myplace"
-    # The id may be followed by end-of-line or a YAML comment.
-    target_re = re.compile(
-        r"^(?P<prefix>\s*target:\s*)(?P<id>" + re.escape(old_id) + r")(?P<suffix>.*)$"
-    )
-
-    for yaml_file in content.rglob("index.yaml"):
-        lines = yaml_file.read_text(encoding="utf-8").splitlines()
-        for i, line in enumerate(lines, start=1):
-            m = target_re.match(line)
-            if m:
-                new_line = m.group("prefix") + new_id + m.group("suffix")
-                refs.append(MoveRef(
-                    file=yaml_file,
-                    line_no=i,
-                    old_text=line,
-                    new_text=new_line,
-                ))
-
-    # --- scan index.md files for [[<old_id> wikilinks ----------------------
-    # Matches [[old_id]] and [[old_id|Display]] and [[old_id#anchor...]]
-    wikilink_re = re.compile(
-        r"\[\[" + re.escape(old_id) + r"(?P<rest>[|\]#])"
-    )
-
-    for md_file in content.rglob("index.md"):
-        text = md_file.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        for i, line in enumerate(lines, start=1):
-            if wikilink_re.search(line):
-                new_line = wikilink_re.sub(r"[[" + new_id + r"\g<rest>", line)
-                refs.append(MoveRef(
-                    file=md_file,
-                    line_no=i,
-                    old_text=line,
-                    new_text=new_line,
-                ))
-
-    # --- scan SVG files in assets/ for href="/<old_id>" links --------------
-    # SVG links use a leading slash: <a href="/foundation/fabric/mundus" />
-    svg_href_re = re.compile(
-        r'(?P<pre>href=")/' + re.escape(old_id) + r'(?P<post>["/\s])'
-    )
-    assets = assets_root(project)
-    if assets.is_dir():
-        for svg_file in assets.rglob("*.svg"):
-            lines = svg_file.read_text(encoding="utf-8").splitlines()
-            for i, line in enumerate(lines, start=1):
-                if svg_href_re.search(line):
-                    new_line = svg_href_re.sub(
-                        r"\g<pre>/" + new_id + r"\g<post>", line
-                    )
-                    refs.append(MoveRef(
-                        file=svg_file,
-                        line_no=i,
-                        old_text=line,
-                        new_text=new_line,
-                    ))
+    refs = _scan_entity_refs(project, old_id, new_id)
 
     return MovePlan(
         old_id=old_id,
@@ -253,12 +359,6 @@ def plan_move_kind(project: Path, kind_path: str, new_parent: str) -> MovePlan:
             old_id=kind_path, new_id="", old_dir=old_dir, new_dir=old_dir,
             is_kind=True,
             error=f"kind not found: content_meta/kinds/{kind_path}",
-        )
-    if not is_kind_folder(old_dir):
-        return MovePlan(
-            old_id=kind_path, new_id="", old_dir=old_dir, new_dir=old_dir,
-            is_kind=True,
-            error=f"not a kind folder (no _kind.yaml): content_meta/kinds/{kind_path}",
         )
 
     slug = old_dir.name
@@ -358,6 +458,11 @@ def _parse_yaml_field(lines: list[str], field: str) -> str:
     Handles simple ``field: value`` lines and block-scalar headers
     (``field: >-`` / ``field: |``) by concatenating the indented body.
     Returns an empty string if the field is absent.
+
+    *lines* should be the frontmatter lines only (use
+    :func:`frontmatter_lines`); passing the full file is also safe but
+    risks colliding with body content that happens to start with the
+    field name.
     """
     prefix = f"{field}:"
     for i, line in enumerate(lines):
@@ -392,12 +497,11 @@ def collect_namespace_entities(project: Path, namespace_path: str) -> list[tuple
         return []
 
     results: list[tuple[str, str]] = []
-    for yaml_file in sorted(ns_dir.rglob("index.yaml")):
-        entity_dir = yaml_file.parent
-        if not is_entity_folder(entity_dir):
-            continue
-        lines = yaml_file.read_text(encoding="utf-8").splitlines()
-        name = _parse_yaml_field(lines, "name")
+    for md_file in sorted(iter_entity_md_files(ns_dir)):
+        entity_dir = md_file.parent
+        text = md_file.read_text(encoding="utf-8")
+        fm_lines = frontmatter_lines(text)
+        name = _parse_yaml_field(fm_lines, "name")
         if not name:
             continue
         entity_id = str(entity_dir.relative_to(content))
@@ -414,15 +518,14 @@ def collect_all_kinds(project: Path) -> list[tuple[str, str]]:
     """
     kinds = kinds_root(project).resolve()
     results: list[tuple[str, str]] = []
-    for kind_yaml in sorted(kinds.rglob("_kind.yaml")):
-        kind_dir = kind_yaml.parent
-        if not is_kind_folder(kind_dir):
-            continue
+    for kind_md in sorted(iter_kind_md_files(kinds)):
+        kind_dir = kind_md.parent
         slug = kind_dir.name
         target = f"kinds/{slug}"
-        lines = kind_yaml.read_text(encoding="utf-8").splitlines()
-        singular = _parse_yaml_field(lines, "singular")
-        plural = _parse_yaml_field(lines, "plural")
+        text = kind_md.read_text(encoding="utf-8")
+        fm_lines = frontmatter_lines(text)
+        singular = _parse_yaml_field(fm_lines, "singular")
+        plural = _parse_yaml_field(fm_lines, "plural")
         if singular:
             results.append((singular, target))
         if plural and plural != singular:
@@ -468,6 +571,8 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
 
     Rules:
     - Text already inside ``[[...]]`` is never re-linked.
+    - Text inside the article's frontmatter block is never re-linked
+      (we only modify body prose).
     - Only the **first** occurrence of each candidate name in the file
       is linked.
     - A whole-word boundary (``\\b``) is required on both sides of the
@@ -489,7 +594,7 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
         return CrosslinkPlan(
             article_id=article_path, md_file=article_dir / "index.md",
             namespace=namespace_path,
-            error=f"not an entity folder (no index.yaml): content/{article_path}",
+            error=f"not an entity folder (no index.md with frontmatter): content/{article_path}",
         )
 
     md_file = article_dir / "index.md"
@@ -540,9 +645,24 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
         patterns.append((pat, match_text, target))
 
     # ------------------------------------------------------------------
-    # Walk the article line-by-line; build edits
+    # Walk the article line-by-line; build edits.
+    # Skip lines inside the frontmatter block — we only crosslink the
+    # body prose.  Frontmatter occupies the first contiguous range
+    # bounded by ``---`` lines (open + close).
     # ------------------------------------------------------------------
-    lines = md_file.read_text(encoding="utf-8").splitlines()
+    full_text = md_file.read_text(encoding="utf-8")
+    lines = full_text.splitlines()
+
+    body_start_idx = 0  # 0-based; lines below this are body
+    if lines and lines[0].rstrip() == "---":
+        # Find the closing fence
+        for j in range(1, len(lines)):
+            if lines[j].rstrip() == "---":
+                body_start_idx = j + 1
+                break
+        else:
+            # No closing fence — treat the whole file as body.
+            body_start_idx = 0
 
     # Track which candidate names have already been linked (first-only rule)
     linked_texts: set[str] = set()
@@ -550,6 +670,8 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
     edits: list[CrosslinkEdit] = []
 
     for line_idx, line in enumerate(lines):
+        if line_idx < body_start_idx:
+            continue
         new_line = line
 
         for pat, match_text, target in patterns:
@@ -644,13 +766,15 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
     *new_slug* is the new folder name only (no slashes).
 
     For a **content entity**, updates:
-      - ``target: <old-id>`` in any index.yaml
-      - ``[[<old-id>...]]`` full-path wikilinks in any index.md
+      - ``target: <old-id>`` in any entity's index.md (within frontmatter)
+      - ``[[<old-id>...]]`` full-path wikilinks in any entity's index.md body
+      - SVG ``href="/<old-id>..."`` links under ``assets/``
 
     For a **kind**, updates:
-      - ``kind: <old-slug>`` in any index.yaml  (slug-only field)
-      - ``kinds/<old-slug>`` in kind-affinity fields (nativeBeings, traits, …)
-      - ``[[kinds/<old-slug>...]]`` wikilinks in any index.md
+      - ``kind: <old-slug>`` in any entity's index.md frontmatter
+      - ``kinds/<old-slug>`` in kind-affinity fields of any entity's
+        index.md frontmatter
+      - ``[[kinds/<old-slug>...]]`` wikilinks in any entity's index.md body
     """
     if "/" in new_slug:
         return RenamePlan(
@@ -674,18 +798,12 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
                 error=f"not found under content/ or content_meta/kinds/: {old_path}",
             )
         is_kind = True
-        if not is_kind_folder(old_dir):
-            return RenamePlan(
-                old_id=old_path, new_id="", old_dir=old_dir, new_dir=old_dir,
-                is_kind=True,
-                error=f"not a kind folder (no _kind.yaml): content_meta/kinds/{old_path}",
-            )
     else:
         if not is_entity_folder(old_dir):
             return RenamePlan(
                 old_id=old_path, new_id="", old_dir=old_dir, new_dir=old_dir,
                 is_kind=False,
-                error=f"not an entity folder (no index.yaml): content/{old_path}",
+                error=f"not an entity folder (no index.md with frontmatter): content/{old_path}",
             )
 
     old_slug = old_dir.name
@@ -708,42 +826,38 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
 
     if is_kind:
         old_id = str(old_dir.relative_to(kinds))
-        new_id = str(new_dir.relative_to(kinds.parent / "kinds"))
+        new_id = str(new_dir.relative_to(kinds))
 
-        # 1. kind: <old-slug>  in any index.yaml
+        # 1. kind: <old-slug>  in any entity's index.md frontmatter.
         #    The kind: field stores only the leaf slug, not the full path.
         kind_field_re = re.compile(
             r"^(?P<prefix>kind:\s*)(?P<slug>" + re.escape(old_slug) + r")(?P<suffix>.*)$"
         )
-        for yaml_file in content.rglob("index.yaml"):
-            lines = yaml_file.read_text(encoding="utf-8").splitlines()
+        # 2. kinds/<old-slug>  in kind-affinity fields of any entity's
+        #    index.md frontmatter.  Matches  kinds/old-slug  as a whole
+        #    token (not mid-path).
+        affinity_re = re.compile(
+            r"(?P<pre>kinds/)(?P<slug>" + re.escape(old_slug) + r")(?P<post>[\s,\]\"']|$)"
+        )
+        # 3. [[kinds/<old-slug>...]] wikilinks in any entity's index.md body.
+        wikilink_re = re.compile(
+            r"\[\[kinds/" + re.escape(old_slug) + r"(?P<rest>[|\]#])"
+        )
+
+        for md_file in iter_entity_md_files(content):
+            lines = md_file.read_text(encoding="utf-8").splitlines()
             for i, line in enumerate(lines, start=1):
                 m = kind_field_re.match(line)
                 if m:
                     new_line = m.group("prefix") + new_slug + m.group("suffix")
-                    refs.append(MoveRef(yaml_file, i, line, new_line))
-
-        # 2. kinds/<old-slug>  in kind-affinity fields of any index.yaml
-        #    Matches  kinds/old-slug  as a whole token (not mid-path)
-        affinity_re = re.compile(
-            r"(?P<pre>kinds/)(?P<slug>" + re.escape(old_slug) + r")(?P<post>[\s,\]\"']|$)"
-        )
-        for yaml_file in content.rglob("index.yaml"):
-            lines = yaml_file.read_text(encoding="utf-8").splitlines()
-            for i, line in enumerate(lines, start=1):
+                    refs.append(MoveRef(md_file, i, line, new_line))
+                    continue
                 if affinity_re.search(line):
                     new_line = affinity_re.sub(
                         r"\g<pre>" + new_slug + r"\g<post>", line
                     )
-                    refs.append(MoveRef(yaml_file, i, line, new_line))
-
-        # 3. [[kinds/<old-slug>...]] wikilinks in any index.md
-        wikilink_re = re.compile(
-            r"\[\[kinds/" + re.escape(old_slug) + r"(?P<rest>[|\]#])"
-        )
-        for md_file in content.rglob("index.md"):
-            lines = md_file.read_text(encoding="utf-8").splitlines()
-            for i, line in enumerate(lines, start=1):
+                    refs.append(MoveRef(md_file, i, line, new_line))
+                    continue
                 if wikilink_re.search(line):
                     new_line = wikilink_re.sub(
                         r"[[kinds/" + new_slug + r"\g<rest>", line
@@ -753,44 +867,7 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
     else:
         old_id = str(old_dir.relative_to(content))
         new_id = str(new_dir.relative_to(content))
-
-        # 1. target: <old-id>  in any index.yaml
-        target_re = re.compile(
-            r"^(?P<prefix>\s*target:\s*)(?P<id>" + re.escape(old_id) + r")(?P<suffix>.*)$"
-        )
-        for yaml_file in content.rglob("index.yaml"):
-            lines = yaml_file.read_text(encoding="utf-8").splitlines()
-            for i, line in enumerate(lines, start=1):
-                m = target_re.match(line)
-                if m:
-                    new_line = m.group("prefix") + new_id + m.group("suffix")
-                    refs.append(MoveRef(yaml_file, i, line, new_line))
-
-        # 2. [[<old-id>...]] full-path wikilinks in any index.md
-        wikilink_re = re.compile(
-            r"\[\[" + re.escape(old_id) + r"(?P<rest>[|\]#])"
-        )
-        for md_file in content.rglob("index.md"):
-            lines = md_file.read_text(encoding="utf-8").splitlines()
-            for i, line in enumerate(lines, start=1):
-                if wikilink_re.search(line):
-                    new_line = wikilink_re.sub(r"[[" + new_id + r"\g<rest>", line)
-                    refs.append(MoveRef(md_file, i, line, new_line))
-
-        # 3. href="/<old-id>..." links in SVG files under assets/
-        svg_href_re = re.compile(
-            r'(?P<pre>href=")/' + re.escape(old_id) + r'(?P<post>["/\s])'
-        )
-        assets = assets_root(project)
-        if assets.is_dir():
-            for svg_file in assets.rglob("*.svg"):
-                lines = svg_file.read_text(encoding="utf-8").splitlines()
-                for i, line in enumerate(lines, start=1):
-                    if svg_href_re.search(line):
-                        new_line = svg_href_re.sub(
-                            r"\g<pre>/" + new_id + r"\g<post>", line
-                        )
-                        refs.append(MoveRef(svg_file, i, line, new_line))
+        refs = _scan_entity_refs(project, old_id, new_id)
 
     return RenamePlan(
         old_id=old_id,
