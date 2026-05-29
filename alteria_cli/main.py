@@ -361,12 +361,17 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
 @click.pass_context
 def move(ctx: click.Context, entity_path: str, new_parent: str, is_kind: bool, dry_run: bool, yes: bool) -> None:
-    """Move an entity (or kind) to a new parent and update all references.
+    """Move an entity, collection, or kind to a new parent and update all references.
 
     Without --kind:
-      ENTITY_PATH is relative to content/ (e.g. aurethia/places/old/myplace).
+      ENTITY_PATH is relative to content/ (e.g. aurethia/places/old/myplace,
+      or a collection like aurethia/places/old).
       NEW_PARENT  is the destination collection, also relative to content/.
       All target: relations and full-path wikilinks are rewritten automatically.
+
+      When ENTITY_PATH points at a collection (folder with _collection.md),
+      the move cascades to every descendant entity and collection id, and
+      all references to them are rewritten in one pass.
 
     With --kind:
       ENTITY_PATH is relative to content_meta/kinds/ (e.g. being/human).

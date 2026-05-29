@@ -291,7 +291,11 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
     Build a MovePlan for moving *entity_path* under *new_parent*.
 
     *entity_path* and *new_parent* are both relative to content/.
-    The entity slug (folder name) is preserved; only the parent changes.
+    The entity (or collection) slug is preserved; only the parent changes.
+
+    If *entity_path* points at a collection (folder with _collection.md),
+    the move cascades to all descendant entity and collection IDs and
+    rewrites every reference to them.
 
     Scans the whole project for ``target:`` and full-path wikilinks
     referring to the old id, plus SVG ``href`` links under ``assets/``.
@@ -304,10 +308,15 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
             old_id=entity_path, new_id="", old_dir=old_dir, new_dir=old_dir,
             error=f"entity not found: content/{entity_path}",
         )
+
+    # Dispatch to collection-move if this folder is a collection.
+    if is_collection_folder(old_dir):
+        return plan_move_collection(project, entity_path, new_parent)
+
     if not is_entity_folder(old_dir):
         return MovePlan(
             old_id=entity_path, new_id="", old_dir=old_dir, new_dir=old_dir,
-            error=f"not an entity folder (no index.md with frontmatter): content/{entity_path}",
+            error=f"not an entity folder or collection (no index.md with frontmatter or _collection.md): content/{entity_path}",
         )
 
     slug = old_dir.name
@@ -328,6 +337,72 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
         )
 
     refs = _scan_entity_refs(project, old_id, new_id)
+
+    return MovePlan(
+        old_id=old_id,
+        new_id=new_id,
+        old_dir=old_dir,
+        new_dir=new_dir,
+        refs=refs,
+    )
+
+
+def plan_move_collection(project: Path, collection_path: str, new_parent: str) -> MovePlan:
+    """
+    Build a MovePlan for moving a whole collection under *new_parent*.
+
+    *collection_path* and *new_parent* are both relative to content/.
+    The collection slug is preserved; only the parent changes.
+
+    Cascades the move to all descendant entity and collection IDs and
+    rewrites every reference (``target:``, full-path wikilinks, SVG hrefs)
+    in a single pass per line, so lines mentioning multiple descendants
+    are rewritten in one shot.
+
+    The collection cannot be moved into itself or any of its own
+    descendants — that's caught explicitly.
+    """
+    content = content_root(project).resolve()
+
+    old_dir = (content / collection_path).resolve()
+    if not old_dir.is_dir():
+        return MovePlan(
+            old_id=collection_path, new_id="", old_dir=old_dir, new_dir=old_dir,
+            error=f"collection not found: content/{collection_path}",
+        )
+    if not is_collection_folder(old_dir):
+        return MovePlan(
+            old_id=collection_path, new_id="", old_dir=old_dir, new_dir=old_dir,
+            error=f"not a collection folder (no _collection.md): content/{collection_path}",
+        )
+
+    slug = old_dir.name
+    new_parent_dir = (content / new_parent).resolve()
+    new_dir = new_parent_dir / slug
+    old_id = collection_path.rstrip("/")
+    new_id = str(new_dir.relative_to(content))
+
+    if new_dir == old_dir:
+        return MovePlan(
+            old_id=old_id, new_id=new_id, old_dir=old_dir, new_dir=new_dir,
+            error="source and destination are the same",
+        )
+    # Prevent moving a collection inside itself.
+    try:
+        new_parent_dir.relative_to(old_dir)
+        return MovePlan(
+            old_id=old_id, new_id=new_id, old_dir=old_dir, new_dir=new_dir,
+            error="cannot move a collection into itself or any of its descendants",
+        )
+    except ValueError:
+        pass
+    if new_dir.exists():
+        return MovePlan(
+            old_id=old_id, new_id=new_id, old_dir=old_dir, new_dir=new_dir,
+            error=f"destination already exists: content/{new_id}",
+        )
+
+    refs = _scan_collection_refs(project, old_id, new_id)
 
     return MovePlan(
         old_id=old_id,
