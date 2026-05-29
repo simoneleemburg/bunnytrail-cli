@@ -289,9 +289,9 @@ def add_kind(
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
 @click.pass_context
 def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes: bool) -> None:
-    """Rename an entity slug or a kind slug, updating all references.
+    """Rename an entity, collection, or kind slug, updating all references.
 
-    OLD_PATH is relative to content/ for entities, or relative to
+    OLD_PATH is relative to content/ for entities/collections, or relative to
     content_meta/kinds/ for kinds.  The tool checks content/ first;
     if not found there it tries content_meta/kinds/.
 
@@ -300,6 +300,11 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
     For entities, updates: target: relations and full-path wikilinks
     inside any entity's index.md (frontmatter + body), and SVG href
     links under assets/.
+
+    For collections, renames the folder and cascades to all descendant
+    entity and collection IDs. Updates all references to descendants
+    (target:, [[wikilinks]], SVG hrefs).
+
     For kinds, updates: kind: fields, kinds/<slug> affinity fields,
     and [[kinds/<slug>...]] wikilinks — all inside entities' index.md.
 
@@ -313,7 +318,7 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
         click.echo(f"Error: {plan.error}", err=True)
         sys.exit(1)
 
-    kind_label = "kind" if plan.is_kind else "entity"
+    kind_label = "kind" if plan.is_kind else "entity/collection"
     id_root = "content_meta/kinds" if plan.is_kind else "content"
     click.echo(f"Rename {kind_label}:  {id_root}/{plan.old_id}")
     click.echo(f"              ->  {id_root}/{plan.new_id}")

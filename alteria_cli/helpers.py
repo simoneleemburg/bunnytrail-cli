@@ -758,7 +758,7 @@ class RenamePlan:
 
 def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
     """
-    Build a RenamePlan for renaming the slug of a content entity or a kind.
+    Build a RenamePlan for renaming the slug of a content entity, collection, or kind.
 
     *old_path* is relative to content/ **or** content_meta/kinds/.
     The tool tries content/ first; if not found there it tries kinds/.
@@ -769,6 +769,9 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
       - ``target: <old-id>`` in any entity's index.md (within frontmatter)
       - ``[[<old-id>...]]`` full-path wikilinks in any entity's index.md body
       - SVG ``href="/<old-id>..."`` links under ``assets/``
+
+    For a **collection**, renames the folder and cascades the rename to all
+    descendant entity and collection IDs. Updates all references to descendants.
 
     For a **kind**, updates:
       - ``kind: <old-slug>`` in any entity's index.md frontmatter
@@ -799,11 +802,15 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
             )
         is_kind = True
     else:
+        # Check if it's a collection (has _collection.md)
+        if is_collection_folder(old_dir):
+            return plan_rename_collection(project, old_path, new_slug)
+        
         if not is_entity_folder(old_dir):
             return RenamePlan(
                 old_id=old_path, new_id="", old_dir=old_dir, new_dir=old_dir,
                 is_kind=False,
-                error=f"not an entity folder (no index.md with frontmatter): content/{old_path}",
+                error=f"not an entity folder or collection (no index.md with frontmatter or _collection.md): content/{old_path}",
             )
 
     old_slug = old_dir.name
@@ -906,3 +913,228 @@ def execute_rename(plan: RenamePlan) -> None:
         fpath.write_text("".join(lines), encoding="utf-8")
 
     shutil.move(str(plan.old_dir), str(plan.new_dir))
+
+
+# ---------------------------------------------------------------------------
+# Collection rename — cascading entity ID updates
+# ---------------------------------------------------------------------------
+
+
+def plan_rename_collection(project: Path, old_path: str, new_slug: str) -> RenamePlan:
+    """
+    Build a RenamePlan for renaming a collection folder.
+    
+    *old_path* is relative to content/ and must point to a collection
+    (folder with _collection.md).
+    
+    *new_slug* is the new folder name only (no slashes).
+    
+    This command renames the collection folder and cascades the rename to all
+    descendant entity and collection IDs. It also updates the collection's
+    _collection.md title field if present.
+    
+    For each line touched, applies all needed replacements at once:
+      - ``target: <old-collection-id>/<...>`` in any entity's index.md
+      - ``[[<old-collection-id>/<...>...]]`` full-path wikilinks in any
+        entity's index.md body
+      - SVG ``href="/<old-collection-id>/<...>..."`` links under ``assets/``
+    
+    Each line is rewritten at most once even if it contains multiple
+    matches, so all replacements survive.
+    """
+    if "/" in new_slug:
+        return RenamePlan(
+            old_id=old_path, new_id="", old_dir=Path(), new_dir=Path(),
+            is_kind=False,
+            error="new-slug must be a plain folder name with no slashes",
+        )
+    
+    content = content_root(project).resolve()
+    
+    old_dir = (content / old_path).resolve()
+    if not old_dir.is_dir():
+        return RenamePlan(
+            old_id=old_path, new_id="", old_dir=old_dir, new_dir=old_dir,
+            is_kind=False,
+            error=f"not found under content/: {old_path}",
+        )
+    
+    if not is_collection_folder(old_dir):
+        return RenamePlan(
+            old_id=old_path, new_id="", old_dir=old_dir, new_dir=old_dir,
+            is_kind=False,
+            error=f"not a collection folder (no _collection.md): content/{old_path}",
+        )
+    
+    old_slug = old_dir.name
+    if old_slug == new_slug:
+        return RenamePlan(
+            old_id=old_path, new_id=old_path, old_dir=old_dir, new_dir=old_dir,
+            is_kind=False,
+            error="old and new slug are the same",
+        )
+    
+    new_dir = old_dir.parent / new_slug
+    if new_dir.exists():
+        return RenamePlan(
+            old_id=old_path, new_id="", old_dir=old_dir, new_dir=new_dir,
+            is_kind=False,
+            error=f"destination already exists: {new_dir.relative_to(project)}",
+        )
+    
+    old_id = str(old_dir.relative_to(content))
+    new_id = str(new_dir.relative_to(content))
+    
+    refs: list[MoveRef] = _scan_collection_refs(project, old_id, new_id)
+    
+    # Update _collection.md title if it appears to derive from the old slug.
+    collection_md = old_dir / "_collection.md"
+    if collection_md.is_file():
+        title_ref = _collection_title_ref(collection_md, old_slug, new_slug)
+        if title_ref is not None:
+            refs.append(title_ref)
+    
+    return RenamePlan(
+        old_id=old_id,
+        new_id=new_id,
+        old_dir=old_dir,
+        new_dir=new_dir,
+        is_kind=False,
+        refs=refs,
+    )
+
+
+def _scan_collection_refs(
+    project: Path,
+    old_collection_id: str,
+    new_collection_id: str,
+) -> list[MoveRef]:
+    """
+    Scan the project for references whose path starts with *old_collection_id*
+    (as a path prefix) and produce one MoveRef per affected line, with all
+    occurrences on that line rewritten to use *new_collection_id*.
+    
+    Matches:
+      - ``target: <old-collection-id>/<...>`` in entity index.md files
+      - ``[[<old-collection-id>/<...>...]]`` wikilinks in entity index.md bodies
+      - ``href="/<old-collection-id>/<...>"`` in SVG files under assets/
+    """
+    content = content_root(project).resolve()
+    refs: list[MoveRef] = []
+    
+    # target: <old-collection-id>/<descendant-path>
+    target_re = re.compile(
+        r"(?P<prefix>^\s*target:\s*)(?P<id>"
+        + re.escape(old_collection_id)
+        + r"/[A-Za-z0-9_\-/]+)(?P<suffix>.*)$"
+    )
+    # [[<old-collection-id>/<descendant-path>...]]  — wikilinks must contain
+    # at least one more path segment after the collection id.
+    wikilink_re = re.compile(
+        r"\[\[" + re.escape(old_collection_id) + r"/(?P<rest>[^\]\|#]+)(?P<term>[|\]#])"
+    )
+    # SVG href="/<old-collection-id>/<...>"
+    svg_href_re = re.compile(
+        r'(?P<pre>href=")/' + re.escape(old_collection_id)
+        + r'/(?P<rest>[^"\s/]+(?:/[^"\s]*)?)(?P<post>["\s])'
+    )
+    
+    def rewrite_line(line: str) -> str:
+        new_line = line
+        # target: replacement (anchored, single match per line)
+        m = target_re.match(new_line)
+        if m:
+            new_line = (
+                m.group("prefix")
+                + new_collection_id
+                + m.group("id")[len(old_collection_id):]
+                + m.group("suffix")
+            )
+        # wikilink replacements (may be multiple per line)
+        new_line = wikilink_re.sub(
+            lambda mm: f"[[{new_collection_id}/{mm.group('rest')}{mm.group('term')}",
+            new_line,
+        )
+        # svg href replacements (may be multiple per line)
+        new_line = svg_href_re.sub(
+            lambda mm: f'{mm.group("pre")}/{new_collection_id}/{mm.group("rest")}{mm.group("post")}',
+            new_line,
+        )
+        return new_line
+    
+    for md_file in iter_entity_md_files(content):
+        lines = md_file.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines, start=1):
+            new_line = rewrite_line(line)
+            if new_line != line:
+                refs.append(MoveRef(md_file, i, line, new_line))
+    
+    assets = assets_root(project)
+    if assets.is_dir():
+        for svg_file in assets.rglob("*.svg"):
+            lines = svg_file.read_text(encoding="utf-8").splitlines()
+            for i, line in enumerate(lines, start=1):
+                if svg_href_re.search(line):
+                    new_line = svg_href_re.sub(
+                        lambda mm: f'{mm.group("pre")}/{new_collection_id}/{mm.group("rest")}{mm.group("post")}',
+                        line,
+                    )
+                    if new_line != line:
+                        refs.append(MoveRef(svg_file, i, line, new_line))
+    
+    return refs
+
+
+def _slug_to_title(slug: str) -> str:
+    """Convert a slug like 'primitive-elements' to 'Primitive Elements'."""
+    return " ".join(word.capitalize() for word in slug.replace("_", "-").split("-") if word)
+
+
+def _collection_title_ref(
+    collection_md: Path,
+    old_slug: str,
+    new_slug: str,
+) -> MoveRef | None:
+    """
+    If the collection's _collection.md has a title: field whose value matches
+    the title-case form of *old_slug*, return a MoveRef that rewrites it to
+    the title-case form of *new_slug*. Otherwise return None — the user
+    can update the title manually if it doesn't follow the slug.
+    """
+    text = collection_md.read_text(encoding="utf-8")
+    fm, _ = split_frontmatter(text)
+    if fm is None:
+        return None
+    
+    old_title = _slug_to_title(old_slug)
+    new_title = _slug_to_title(new_slug)
+    
+    title_re = re.compile(r"^(?P<prefix>\s*title:\s*)(?P<value>.*?)(?P<suffix>\s*)$")
+    
+    # Walk the file lines, but only inspect frontmatter region.
+    lines = text.splitlines()
+    # frontmatter occupies lines 1..N where N is the closing fence
+    # we look only inside the FM block
+    for i, line in enumerate(lines, start=1):
+        if i == 1:
+            continue  # opening fence
+        if line.strip() == "---":
+            break  # closing fence — stop scanning
+        m = title_re.match(line)
+        if not m:
+            continue
+        # Strip optional surrounding quotes for comparison.
+        value = m.group("value").strip()
+        unquoted = value.strip("\"'")
+        if unquoted == old_title:
+            # Preserve quoting style if any
+            if value.startswith('"') and value.endswith('"'):
+                new_value = f'"{new_title}"'
+            elif value.startswith("'") and value.endswith("'"):
+                new_value = f"'{new_title}'"
+            else:
+                new_value = new_title
+            new_line = m.group("prefix") + new_value + m.group("suffix")
+            return MoveRef(collection_md, i, line, new_line)
+        return None  # title exists but doesn't match — leave it alone
+    return None
