@@ -114,7 +114,7 @@ def test_crosslink_folder_empty_directory_reports_no_entities(
         project, "aurethia/empty-shelf", "aurethia/places"
     )
     assert plans == []
-    assert "no entities or collections found" in err
+    assert "no entities, collections, or guides found" in err
 
 
 def test_crosslink_folder_missing_namespace(project: Path) -> None:
@@ -562,3 +562,86 @@ def test_crosslink_collection_self_exclusion(project: Path) -> None:
     # 'Bayurinda' is not a candidate (collections aren't in the pool),
     # so it stays plain text.
     assert "[[bayurinda" not in body, body
+
+
+# ---------------------------------------------------------------------------
+# Guides
+# ---------------------------------------------------------------------------
+
+def _set_guide_body(project: Path, slug: str, body: str) -> None:
+    md = project / "content_meta" / "guides" / slug / "index.md"
+    text = md.read_text(encoding="utf-8")
+    head, _, _ = text.partition("\n---\n")
+    md.write_text(head + "\n---\n" + body, encoding="utf-8")
+
+
+def _read_guide_body(project: Path, slug: str) -> str:
+    md = project / "content_meta" / "guides" / slug / "index.md"
+    text = md.read_text(encoding="utf-8")
+    _, _, body = text.partition("\n---\n")
+    return body
+
+
+def test_crosslink_guide_body_gets_linked(project: Path) -> None:
+    # The `cognita` guide mentions Sharazan and Nuunlau by display
+    # name in its body.  Crosslink, scoped to aurethia/places, should
+    # auto-link both — and because a guide lives outside any cluster,
+    # the wikilink target is the full id (preferred_form rule for
+    # rendering pages with cluster=None).
+    _set_guide_body(
+        project, "cognita",
+        "An overview that visits Sharazan. Also touches Nuunlau.\n",
+    )
+    plan = plan_crosslink(project, "guides/cognita", "aurethia/places")
+    assert plan.error == "", plan.error
+    execute_crosslink(plan)
+    body = _read_guide_body(project, "cognita")
+    assert "[[aurethia/places/sharazan|Sharazan]]" in body, body
+    assert "[[aurethia/places/bayurinda/nuunlau|Nuunlau]]" in body, body
+
+
+def test_crosslink_guide_frontmatter_is_not_touched(project: Path) -> None:
+    # Mention 'Sharazan' inside the guide's frontmatter (in the
+    # summary).  Crosslink must not rewrite frontmatter.
+    md = project / "content_meta" / "guides" / "cognita" / "index.md"
+    md.write_text(
+        "---\n"
+        "title: Alteria Cognita\n"
+        "summary: A tour through Sharazan and the rest.\n"
+        "---\n"
+        "Body has no candidate names.\n",
+        encoding="utf-8",
+    )
+    plan = plan_crosslink(project, "guides/cognita", "aurethia/places")
+    assert plan.error == "", plan.error
+    assert plan.edits == []
+
+
+def test_crosslink_folder_walks_guides(project: Path) -> None:
+    _set_guide_body(
+        project, "cognita",
+        "Once visited Sharazan in passing.\n",
+    )
+    plans, err = plan_crosslink_folder(
+        project, "guides", "aurethia/places",
+    )
+    assert err == "", err
+    article_ids = {p.article_id for p in plans if p.edits}
+    assert "guides/cognita" in article_ids
+
+
+def test_crosslink_single_guide_folder(project: Path) -> None:
+    # Single-target form: passing guides/<slug> directly to the
+    # folder planner should route to plan_crosslink for that one
+    # guide.
+    _set_guide_body(
+        project, "cognita",
+        "Once visited Sharazan in passing.\n",
+    )
+    plans, err = plan_crosslink_folder(
+        project, "guides/cognita", "aurethia/places",
+    )
+    assert err == "", err
+    assert len(plans) == 1
+    assert plans[0].article_id == "guides/cognita"
+    assert plans[0].edits

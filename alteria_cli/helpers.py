@@ -49,6 +49,10 @@ def kinds_root(project: Path) -> Path:
     return project / "content_meta" / "kinds"
 
 
+def guides_root(project: Path) -> Path:
+    return project / "content_meta" / "guides"
+
+
 def assets_root(project: Path) -> Path:
     return project / "assets"
 
@@ -203,6 +207,75 @@ def iter_kind_md_files(kinds: Path):
         yield md_file
 
 
+def iter_collection_md_files(content: Path):
+    """Yield every ``_collection.md`` marker under *content*."""
+    for md_file in content.rglob("_collection.md"):
+        yield md_file
+
+
+def iter_guide_md_files(guides: Path):
+    """Yield every ``index.md`` directly under a guide folder."""
+    if not guides.is_dir():
+        return
+    for child in sorted(guides.iterdir()):
+        md = child / "index.md"
+        if child.is_dir() and md.is_file():
+            yield md
+
+
+def iter_link_consumer_files(project: Path):
+    """Yield every markdown file whose body may contain wikilinks
+    that need to be kept in sync when entities/kinds/collections are
+    moved or renamed.
+
+    Currently: entity ``index.md``, collection ``_collection.md``,
+    kind ``_kind.md``, and guide ``index.md``. Blog posts are
+    deliberately excluded — wikilinks do not resolve in blog prose
+    (see STRUCTURE.md).
+    """
+    content = content_root(project)
+    if content.is_dir():
+        yield from iter_entity_md_files(content)
+        yield from iter_collection_md_files(content)
+    kinds = kinds_root(project)
+    if kinds.is_dir():
+        yield from iter_kind_md_files(kinds)
+    guides = guides_root(project)
+    if guides.is_dir():
+        yield from iter_guide_md_files(guides)
+
+
+def page_id_for(md_file: Path, project: Path) -> str:
+    """Return a synthetic page id for *md_file*, suitable for passing
+    to :func:`wikilinks.scope_of` and for resolver page-relative
+    operations.
+
+    - Entity ``index.md``  → folder path relative to ``content/``
+      (e.g. ``aurethia/places/bayurinda/sharazan``).
+    - Collection ``_collection.md`` → folder path relative to
+      ``content/`` (e.g. ``aurethia/places``).
+    - Kind ``_kind.md`` → ``kinds/<path>`` (e.g. ``kinds/being/mortal``).
+    - Guide ``index.md`` → ``guides/<slug>`` (e.g. ``guides/cognita``).
+    """
+    content = content_root(project)
+    kinds = kinds_root(project)
+    guides = guides_root(project)
+    folder = md_file.parent
+    name = md_file.name
+    try:
+        if name == "_kind.md" and kinds.is_dir():
+            return "kinds/" + str(folder.relative_to(kinds))
+        if folder.parent == guides and name == "index.md":
+            return "guides/" + folder.name
+        # Entity or collection — both live under content/.
+        if content.is_dir():
+            return str(folder.relative_to(content))
+    except ValueError:
+        pass
+    # Last resort: project-relative path of the folder.
+    return str(folder.relative_to(project))
+
+
 # ---------------------------------------------------------------------------
 # Move — reference scanning and execution
 # ---------------------------------------------------------------------------
@@ -313,8 +386,9 @@ def _scan_entity_refs(
         r"^(?P<prefix>\s*target:\s*)(?P<id>" + re.escape(old_id) + r")(?P<suffix>.*)$"
     )
 
-    for md_file in iter_entity_md_files(content):
-        page_id = str(md_file.parent.relative_to(content))
+    for md_file in iter_link_consumer_files(project):
+        is_entity = md_file.name == "index.md" and is_entity_folder(md_file.parent)
+        page_id = page_id_for(md_file, project)
         page_cluster = scope_of(page_id, index)
         # Frontmatter region is needed so we don't try to resolve
         # wikilinks inside structured YAML.
@@ -329,16 +403,13 @@ def _scan_entity_refs(
         for i, line in enumerate(lines, start=1):
             in_frontmatter = i <= fm_line_count
 
-            # ---- target: rewrites only inside frontmatter ----------
+            # ---- target: rewrites only inside entity frontmatter ---
             if in_frontmatter:
-                m = target_re.match(line)
-                if m:
-                    new_line = m.group("prefix") + new_id + m.group("suffix")
-                    refs.append(MoveRef(md_file, i, line, new_line))
-                    continue
-
-            # ---- wikilink rewrites only in the body ---------------
-            if in_frontmatter:
+                if is_entity:
+                    m = target_re.match(line)
+                    if m:
+                        new_line = m.group("prefix") + new_id + m.group("suffix")
+                        refs.append(MoveRef(md_file, i, line, new_line))
                 continue
 
             new_line, rewrote, warns = _rewrite_wikilinks_on_line(
@@ -1126,6 +1197,32 @@ def _simplify_wikilinks_on_line(
     return wikilink_re.sub(_replace, line)
 
 
+def _resolve_article_dir(project: Path, article_path: str) -> tuple[Path, str]:
+    """Resolve *article_path* to a folder on disk.
+
+    Returns ``(article_dir, display_path)`` where ``display_path`` is
+    the project-relative path (with the appropriate root prefix
+    re-attached) suitable for use in error messages.
+
+    The accepted forms are:
+
+      * ``guides/<slug>`` — resolved under ``content_meta/guides/``;
+        the display path is ``content_meta/guides/<slug>``.
+      * any other path — resolved under ``content/``; the display
+        path is ``content/<article_path>``.
+    """
+    article_path = article_path.strip("/")
+    if article_path == "guides" or article_path.startswith("guides/"):
+        rel = article_path[len("guides"):].lstrip("/")
+        base = guides_root(project)
+        path = (base / rel).resolve() if rel else base.resolve()
+        return path, f"content_meta/{article_path}"
+    return (
+        (content_root(project) / article_path).resolve(),
+        f"content/{article_path}",
+    )
+
+
 def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> CrosslinkPlan:
     """Build a CrosslinkPlan for inserting wikilinks into *article_path*.
 
@@ -1149,7 +1246,11 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
       the match text, a bare ``[[target]]`` is used instead.
     """
     content = content_root(project).resolve()
-    article_dir = (content / article_path).resolve()
+    article_dir, article_display = _resolve_article_dir(project, article_path)
+    is_guide = (
+        article_dir.parent == guides_root(project).resolve()
+        and (article_dir / "index.md").is_file()
+    )
 
     # Resolve which markdown file we're editing.  An "article" for
     # crosslinking purposes is either:
@@ -1157,16 +1258,21 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
     #     is index.md; or
     #   * a collection folder (has _collection.md) — md_file is
     #     _collection.md.  Frontmatter is title/description; body
-    #     prose, if any, is what we link.
+    #     prose, if any, is what we link; or
+    #   * a guide folder under content_meta/guides/<slug>/ — md_file
+    #     is index.md.  Wikilinks resolve in guide prose per
+    #     STRUCTURE.md.
     # We probe in that order so an entity whose folder also happens
     # to contain a stray _collection.md (shouldn't happen but) wins.
     if not article_dir.is_dir():
         return CrosslinkPlan(
             article_id=article_path, md_file=article_dir / "index.md",
             namespace=namespace_path,
-            error=f"article not found: content/{article_path}",
+            error=f"article not found: {article_display}",
         )
-    if is_entity_folder(article_dir):
+    if is_guide:
+        md_file = article_dir / "index.md"
+    elif is_entity_folder(article_dir):
         md_file = article_dir / "index.md"
     elif is_collection_folder(article_dir):
         md_file = article_dir / "_collection.md"
@@ -1175,9 +1281,9 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
             article_id=article_path, md_file=article_dir / "index.md",
             namespace=namespace_path,
             error=(
-                f"not an entity or collection folder "
-                f"(no index.md with frontmatter or _collection.md): "
-                f"content/{article_path}"
+                f"not an entity, collection, or guide folder "
+                f"(no index.md with frontmatter, _collection.md, "
+                f"or guide index.md): {article_display}"
             ),
         )
 
@@ -1439,17 +1545,24 @@ def plan_crosslink_folder(
     target_path: str,
     namespace_path: str,
 ) -> tuple[list[CrosslinkPlan], str]:
-    """Build a CrosslinkPlan for every entity reachable from *target_path*.
+    """Build a CrosslinkPlan for every article reachable from *target_path*.
 
-    *target_path* is relative to ``content/`` and may be either:
+    *target_path* may be either:
 
-      * a single entity folder (containing ``index.md`` with
-        frontmatter) — yields exactly one plan; or
-      * any other directory under ``content/`` — walks it
-        recursively and yields one plan per entity found.
+      * a single entity / collection / guide folder — yields exactly
+        one plan; or
+      * any other directory — walks it recursively and yields one
+        plan per entity, collection, and guide found.
 
-    *namespace_path* is also relative to ``content/`` and scopes
-    which entities are candidates for linking, exactly as in
+    Recognized roots:
+
+      * paths under ``content/`` (the default) cover entities and
+        collections.
+      * ``guides`` (or ``guides/<slug>``) walks the
+        ``content_meta/guides/`` tree.
+
+    *namespace_path* is relative to ``content/`` and scopes which
+    entities are candidates for linking, exactly as in
     :func:`plan_crosslink`.
 
     Returns ``(plans, error)``. When *error* is non-empty the plans
@@ -1463,40 +1576,58 @@ def plan_crosslink_folder(
     "scanned N entities, M to update".
     """
     content = content_root(project).resolve()
-    target_dir = (content / target_path).resolve()
+    target_dir, target_display = _resolve_article_dir(project, target_path)
 
     if not target_dir.is_dir():
-        return [], f"not a directory: content/{target_path}"
+        return [], f"not a directory: {target_display}"
 
     ns_dir = (content / namespace_path).resolve()
     if not ns_dir.is_dir():
         return [], f"namespace not found: content/{namespace_path}"
 
     # Single-target case: route directly to plan_crosslink, which
-    # handles both entity and collection folders.
-    if is_entity_folder(target_dir) or is_collection_folder(target_dir):
+    # handles entity, collection, and guide folders.
+    guides_dir = guides_root(project).resolve()
+    is_guide_folder = (
+        target_dir.parent == guides_dir
+        and (target_dir / "index.md").is_file()
+    )
+    if (
+        is_entity_folder(target_dir)
+        or is_collection_folder(target_dir)
+        or is_guide_folder
+    ):
         return [plan_crosslink(project, target_path, namespace_path)], ""
 
-    # Folder case: walk and plan each descendant entity AND every
-    # descendant collection.  Collection bodies are typically empty
-    # today but the same matching rules apply when they aren't.
+    # Folder case: walk and plan each descendant article.  Articles
+    # are entities, collections, and (when walking the guides root)
+    # guides.  Collection bodies are typically empty today but the
+    # same matching rules apply when they aren't.
     plans: list[CrosslinkPlan] = []
     seen_ids: set[str] = set()
-    for md_file in sorted(iter_entity_md_files(target_dir)):
-        entity_id = str(md_file.parent.relative_to(content))
-        if entity_id in seen_ids:
-            continue
-        seen_ids.add(entity_id)
-        plans.append(plan_crosslink(project, entity_id, namespace_path))
-    for collection_md in sorted(target_dir.rglob("_collection.md")):
-        collection_id = str(collection_md.parent.relative_to(content))
-        if collection_id in seen_ids:
-            continue
-        seen_ids.add(collection_id)
-        plans.append(plan_crosslink(project, collection_id, namespace_path))
+    if target_dir == guides_dir or guides_dir in target_dir.parents:
+        for guide_md in sorted(iter_guide_md_files(target_dir)):
+            guide_id = "guides/" + guide_md.parent.name
+            if guide_id in seen_ids:
+                continue
+            seen_ids.add(guide_id)
+            plans.append(plan_crosslink(project, guide_id, namespace_path))
+    else:
+        for md_file in sorted(iter_entity_md_files(target_dir)):
+            entity_id = str(md_file.parent.relative_to(content))
+            if entity_id in seen_ids:
+                continue
+            seen_ids.add(entity_id)
+            plans.append(plan_crosslink(project, entity_id, namespace_path))
+        for collection_md in sorted(target_dir.rglob("_collection.md")):
+            collection_id = str(collection_md.parent.relative_to(content))
+            if collection_id in seen_ids:
+                continue
+            seen_ids.add(collection_id)
+            plans.append(plan_crosslink(project, collection_id, namespace_path))
 
     if not plans:
-        return [], f"no entities or collections found under content/{target_path}"
+        return [], f"no entities, collections, or guides found under {target_display}"
 
     return plans, ""
 
@@ -1759,17 +1890,21 @@ def plan_rename(
             r"(?P<anchor>#[a-z0-9-]*)?\|(?P<label>[^\]\n|]+)\]\]"
         )
 
-        for md_file in iter_entity_md_files(content):
+        for md_file in iter_link_consumer_files(project):
+            is_entity = (
+                md_file.name == "index.md" and is_entity_folder(md_file.parent)
+            )
             lines = md_file.read_text(encoding="utf-8").splitlines()
             for i, line in enumerate(lines, start=1):
-                m = kind_field_re.match(line)
-                if m:
-                    new_line = m.group("prefix") + new_slug + m.group("suffix")
-                    refs.append(MoveRef(md_file, i, line, new_line))
-                    continue
+                if is_entity:
+                    m = kind_field_re.match(line)
+                    if m:
+                        new_line = m.group("prefix") + new_slug + m.group("suffix")
+                        refs.append(MoveRef(md_file, i, line, new_line))
+                        continue
                 new_line = line
                 changed = False
-                if affinity_re.search(new_line):
+                if is_entity and affinity_re.search(new_line):
                     new_line = affinity_re.sub(
                         r"\g<pre>" + new_slug + r"\g<post>", new_line
                     )
@@ -2037,8 +2172,9 @@ def _scan_collection_refs(
         + r"(?:/[A-Za-z0-9_\-/]+)?)(?P<suffix>\s*)$"
     )
 
-    for md_file in iter_entity_md_files(content):
-        page_id = str(md_file.parent.relative_to(content))
+    for md_file in iter_link_consumer_files(project):
+        is_entity = md_file.name == "index.md" and is_entity_folder(md_file.parent)
+        page_id = page_id_for(md_file, project)
         page_cluster = scope_of(page_id, index)
         text = md_file.read_text(encoding="utf-8")
         fm, _body = split_frontmatter(text)
@@ -2051,12 +2187,13 @@ def _scan_collection_refs(
             in_frontmatter = i <= fm_line_count
 
             if in_frontmatter:
-                m = target_re.match(line)
-                if m:
-                    new_id = cascade(m.group("id"))
-                    if new_id != m.group("id"):
-                        new_line = m.group("prefix") + new_id + m.group("suffix")
-                        refs.append(MoveRef(md_file, i, line, new_line))
+                if is_entity:
+                    m = target_re.match(line)
+                    if m:
+                        new_id = cascade(m.group("id"))
+                        if new_id != m.group("id"):
+                            new_line = m.group("prefix") + new_id + m.group("suffix")
+                            refs.append(MoveRef(md_file, i, line, new_line))
                 continue
 
             if "[[" not in line:

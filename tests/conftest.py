@@ -30,6 +30,11 @@ def _collection(dir_: Path, title: str, *, universal: bool = False) -> None:
     _write(dir_ / "_collection.md", "\n".join(lines) + "\n")
 
 
+def _guide(dir_: Path, title: str, body: str = "") -> None:
+    fm = f"---\ntitle: {title}\nsummary: stub\n---\n"
+    _write(dir_ / "index.md", fm + body)
+
+
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
     """A minimal but realistic project.
@@ -99,6 +104,15 @@ def project(tmp_path: Path) -> Path:
     _write(
         meta / "kinds" / "being" / "human" / "_kind.md",
         "---\nsingular: human\nplural: humans\n---\n",
+    )
+
+    # A guide that mentions several entities by display name so we
+    # can exercise rename-updates-guide-body and crosslink-on-guide.
+    _guide(
+        meta / "guides" / "cognita",
+        "Alteria Cognita",
+        "An overview that touches Sharazan and Nuunlau, the "
+        "Aurethian cluster, and humans in general.\n",
     )
 
     return root

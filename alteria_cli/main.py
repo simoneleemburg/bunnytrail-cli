@@ -582,7 +582,12 @@ def crosslink(
         click.echo(f"Error: {batch_error}", err=True)
         sys.exit(1)
 
-    click.echo(f"Target:    content/{article_path.rstrip('/')}")
+    target_clean = article_path.rstrip("/")
+    if target_clean == "guides" or target_clean.startswith("guides/"):
+        target_display = f"content_meta/{target_clean}"
+    else:
+        target_display = f"content/{target_clean}"
+    click.echo(f"Target:    {target_display}")
     click.echo(f"Namespace: content/{namespace_path.rstrip('/')}")
     click.echo(f"Articles:  {len(plans)}")
 

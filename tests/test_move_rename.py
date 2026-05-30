@@ -390,3 +390,115 @@ def test_rename_collision_rewrites_existing_peer_link_to_longer_form(project: Pa
     # pointing at aurethia/people/duskmere.
     assert "[[duskmere]]" not in body, body
     assert "people/duskmere" in body, body
+
+
+# ---------------------------------------------------------------------------
+# Cross-file-class scanning: guides, kinds, and collections must all
+# be updated when an entity / kind / collection is renamed or moved.
+# ---------------------------------------------------------------------------
+
+def _write_guide_body(project: Path, slug: str, body: str) -> None:
+    md = project / "content_meta" / "guides" / slug / "index.md"
+    text = md.read_text(encoding="utf-8")
+    head, _, _ = text.partition("\n---\n")
+    md.write_text(head + "\n---\n" + body, encoding="utf-8")
+
+
+def _read_guide_body(project: Path, slug: str) -> str:
+    md = project / "content_meta" / "guides" / slug / "index.md"
+    text = md.read_text(encoding="utf-8")
+    _, _, body = text.partition("\n---\n")
+    return body
+
+
+def _write_kind_body(project: Path, kind_path: str, body: str) -> None:
+    md = project / "content_meta" / "kinds" / kind_path / "_kind.md"
+    text = md.read_text(encoding="utf-8")
+    head, _, _ = text.partition("\n---\n")
+    md.write_text(head + "\n---\n" + body, encoding="utf-8")
+
+
+def _read_kind_body(project: Path, kind_path: str) -> str:
+    md = project / "content_meta" / "kinds" / kind_path / "_kind.md"
+    text = md.read_text(encoding="utf-8")
+    _, _, body = text.partition("\n---\n")
+    return body
+
+
+def _write_collection_body(project: Path, collection_id: str, body: str) -> None:
+    md = project / "content" / collection_id / "_collection.md"
+    text = md.read_text(encoding="utf-8")
+    head, _, _ = text.partition("\n---\n")
+    md.write_text(head + "\n---\n" + body, encoding="utf-8")
+
+
+def _read_collection_body(project: Path, collection_id: str) -> str:
+    md = project / "content" / collection_id / "_collection.md"
+    text = md.read_text(encoding="utf-8")
+    _, _, body = text.partition("\n---\n")
+    return body
+
+
+def test_entity_rename_updates_guide_body(project: Path) -> None:
+    _write_guide_body(
+        project, "cognita",
+        "Visit [[aurethia/places/sharazan|Sharazan]] for the view.\n",
+    )
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    body = _read_guide_body(project, "cognita")
+    # The guide is cluster-less, so preferred_form emits the full id.
+    assert "[[aurethia/places/sharazan-new|Sharazan]]" in body, body
+
+
+def test_entity_rename_updates_kind_body(project: Path) -> None:
+    _write_kind_body(
+        project, "being/human",
+        "Humans walk [[aurethia/places/sharazan|Sharazan]]'s halls.\n",
+    )
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    body = _read_kind_body(project, "being/human")
+    assert "aurethia/places/sharazan-new" in body, body
+
+
+def test_entity_rename_updates_collection_body(project: Path) -> None:
+    _write_collection_body(
+        project, "aurethia/places/bayurinda",
+        "Looks toward [[sharazan|Sharazan]].\n",
+    )
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    body = _read_collection_body(project, "aurethia/places/bayurinda")
+    # Same cluster as bayurinda, so a bare slug remains acceptable.
+    assert "sharazan-new" in body, body
+    assert "[[sharazan]]" not in body, body
+
+
+def test_kind_rename_updates_guide_body(project: Path) -> None:
+    _write_guide_body(
+        project, "cognita",
+        "About [[kinds/human|humans]] and their kin.\n",
+    )
+    plan = plan_rename(project, "being/human", "person")
+    assert plan.error == ""
+    execute_rename(plan)
+    body = _read_guide_body(project, "cognita")
+    assert "[[kinds/person|humans]]" in body, body
+
+
+def test_entity_move_updates_guide_body(project: Path) -> None:
+    _write_guide_body(
+        project, "cognita",
+        "See [[aurethia/places/sharazan]] for context.\n",
+    )
+    plan = plan_move(
+        project, "aurethia/places/sharazan", "aurethia/people",
+    )
+    assert plan.error == ""
+    execute_move(plan)
+    body = _read_guide_body(project, "cognita")
+    assert "aurethia/people/sharazan" in body, body

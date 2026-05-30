@@ -727,11 +727,22 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
         if not namespace_path:
             return
 
-    # Resolve relative to cwd first, then content root
+    # Resolve relative to cwd first, then content root, with a
+    # special-case for the content_meta/guides/ tree (whose paths
+    # we expose as guides/<slug>, not content/...).
+    guides_dir = (project / "content_meta" / "guides").resolve()
+
     def _resolve(p: str) -> str:
         p = p.rstrip("/")
-        if (cwd / p).is_dir():
-            return str((cwd / p).relative_to(content))
+        cand = (cwd / p).resolve() if not Path(p).is_absolute() else Path(p).resolve()
+        if cand.is_dir():
+            if cand == guides_dir or guides_dir in cand.parents:
+                rel = cand.relative_to(guides_dir)
+                return "guides" if str(rel) == "." else f"guides/{rel}"
+            try:
+                return str(cand.relative_to(content))
+            except ValueError:
+                pass
         return p
 
     article_path = _resolve(article_path)
@@ -743,7 +754,11 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
         print(f"  Error: {batch_error}")
         return
 
-    print(f"  Target:    content/{article_path}")
+    if article_path == "guides" or article_path.startswith("guides/"):
+        target_display = f"content_meta/{article_path}"
+    else:
+        target_display = f"content/{article_path}"
+    print(f"  Target:    {target_display}")
     print(f"  Namespace: content/{namespace_path}")
     print(f"  Articles:  {len(plans)}")
 
