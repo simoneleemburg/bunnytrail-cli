@@ -225,6 +225,7 @@ class MovePlan:
     new_dir: Path                   # absolute path of folder after move
     is_kind: bool = False           # True when moving a kind under content_meta/kinds/
     refs: list[MoveRef] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)  # non-fatal scanner findings
     error: str = ""                 # non-empty means the plan is invalid
 
 
@@ -232,40 +233,90 @@ def _scan_entity_refs(
     project: Path,
     old_id: str,
     new_id: str,
-) -> list[MoveRef]:
+) -> tuple[list[MoveRef], list[str]]:
     """Find every reference to *old_id* across the project and produce
     rewrite operations targeting *new_id*.
 
+    Returns ``(refs, warnings)``. Wikilinks are resolved using the
+    full WIKILINKS.md contract — bare slugs, suffix paths, anchored
+    and labelled forms, full paths, and cluster-local + universal
+    fallback. The replacement form is chosen by
+    :func:`wikilinks.preferred_form` so links stay as short as
+    safely possible after the rewrite.
+
     References are looked for in:
-      - ``target: <old-id>`` lines in any entity's ``index.md``
-        (these naturally sit inside the YAML frontmatter, but the
-        regex matches anywhere because ``target:`` only occurs in
-        YAML in practice).
-      - ``[[<old-id>...]]`` wikilinks in any entity's ``index.md``
-        body.
-      - ``href="/<old-id>...`` links in any SVG file under
-        ``assets/``.
+      * ``target: <old-id>`` lines in any entity's ``index.md``
+        frontmatter.
+      * ``[[<link>]]`` tokens that resolve to *old_id* in any
+        entity's ``index.md`` body, **scoped to the rendering page's
+        cluster**.
+      * ``href="/<old-id>...`` links in any SVG file under
+        ``assets/`` (still rewritten as full ids — SVG hrefs aren't
+        cluster-aware).
     """
+    # Local import to avoid a circular import at module load.
+    from .wikilinks import (
+        build_index,
+        cluster_of,
+        iter_wikilinks,
+        preferred_form,
+        render_wikilink,
+        resolve,
+    )
+
     content = content_root(project).resolve()
     refs: list[MoveRef] = []
+    warnings: list[str] = []
+
+    # Build the index against the pre-move state of the repo, plus a
+    # post-move snapshot so preferred_form sees the new id when picking
+    # a replacement form.
+    index = build_index(project)
+    post_index = index.with_renamed_ids({old_id: new_id})
 
     target_re = re.compile(
         r"^(?P<prefix>\s*target:\s*)(?P<id>" + re.escape(old_id) + r")(?P<suffix>.*)$"
     )
-    wikilink_re = re.compile(
-        r"\[\[" + re.escape(old_id) + r"(?P<rest>[|\]#])"
-    )
 
     for md_file in iter_entity_md_files(content):
-        lines = md_file.read_text(encoding="utf-8").splitlines()
+        page_id = str(md_file.parent.relative_to(content))
+        page_cluster = cluster_of(page_id, index)
+        # Frontmatter region is needed so we don't try to resolve
+        # wikilinks inside structured YAML.
+        text = md_file.read_text(encoding="utf-8")
+        fm, _body = split_frontmatter(text)
+        fm_line_count = 0
+        if fm is not None:
+            # +2 for the opening and closing fence lines themselves.
+            fm_line_count = len(fm.splitlines()) + 2
+
+        lines = text.splitlines()
         for i, line in enumerate(lines, start=1):
-            m = target_re.match(line)
-            if m:
-                new_line = m.group("prefix") + new_id + m.group("suffix")
-                refs.append(MoveRef(md_file, i, line, new_line))
+            in_frontmatter = i <= fm_line_count
+
+            # ---- target: rewrites only inside frontmatter ----------
+            if in_frontmatter:
+                m = target_re.match(line)
+                if m:
+                    new_line = m.group("prefix") + new_id + m.group("suffix")
+                    refs.append(MoveRef(md_file, i, line, new_line))
+                    continue
+
+            # ---- wikilink rewrites only in the body ---------------
+            if in_frontmatter:
                 continue
-            if wikilink_re.search(line):
-                new_line = wikilink_re.sub(r"[[" + new_id + r"\g<rest>", line)
+
+            new_line, rewrote, warns = _rewrite_wikilinks_on_line(
+                line=line,
+                page_id=page_id,
+                page_cluster=page_cluster,
+                index=index,
+                post_index=post_index,
+                old_id=old_id,
+                new_id=new_id,
+            )
+            warnings.extend(warns)
+            if rewrote:
                 refs.append(MoveRef(md_file, i, line, new_line))
 
     # SVG href links use a leading slash: <a href="/foundation/fabric/mundus" />
@@ -283,7 +334,97 @@ def _scan_entity_refs(
                     )
                     refs.append(MoveRef(svg_file, i, line, new_line))
 
-    return refs
+    return refs, warnings
+
+
+def _rewrite_wikilinks_on_line(
+    *,
+    line: str,
+    page_id: str,
+    page_cluster: str | None,
+    index,  # WikilinkIndex (pre-move, for resolution)
+    post_index,  # WikilinkIndex (post-move, for preferred_form)
+    old_id: str,
+    new_id: str,
+) -> tuple[str, bool, list[str]]:
+    """Rewrite every ``[[…]]`` on *line* whose resolved target is *old_id*.
+
+    Returns ``(new_line, rewrote_anything, warnings)``. The
+    replacement form is selected by
+    :func:`wikilinks.preferred_form` from the perspective of the
+    rendering page's cluster — bare slugs stay bare where possible,
+    cross-cluster targets get full ids, and so on.
+
+    Anchors and labels on the source link are preserved verbatim.
+    """
+    from .wikilinks import (
+        WIKILINK_RE,
+        iter_wikilinks,
+        preferred_form,
+        render_wikilink,
+        resolve,
+    )
+
+    if "[[" not in line:
+        return line, False, []
+
+    # Same-page wikilinks on the moved entity's OWN index.md don't
+    # need rewriting — those are anchors local to the file. We still
+    # rewrite [[old-id#anchor]] from *other* pages.
+    line_stripped = line.strip()
+    is_directive_line = (
+        line_stripped.startswith("[[collection:")
+        and line_stripped.endswith("]]")
+        and line_stripped.count("[[") == 1
+    )
+
+    warnings: list[str] = []
+    pieces: list[str] = []
+    cursor = 0
+    rewrote = False
+
+    for m in WIKILINK_RE.finditer(line):
+        inner = m.group("inner")
+        # Inline replace requires the same parse/resolve as iter_wikilinks.
+        from .wikilinks import parse_wikilink
+        allow_collection = is_directive_line and m.group(0) == line_stripped
+        parsed = parse_wikilink(inner, allow_collection=allow_collection)
+        if parsed.kind in ("literal", "same-page"):
+            continue
+        # Note: parsed.kind == "lang" tokens may still resolve as bare
+        # slugs (see WIKILINKS.md §"Language tags"). Defer to resolve
+        # for the final word.
+
+        res = resolve(parsed, page_cluster, index)
+        if res.status == "resolved" and res.entity_id == old_id:
+            new_path = preferred_form(new_id, page_cluster, post_index)
+            if parsed.kind == "collection":
+                # Whole-line directive — keep the directive prefix.
+                replacement = f"[[collection:{new_path}]]"
+            else:
+                replacement = render_wikilink(
+                    new_path, parsed.anchor, parsed.label
+                )
+            pieces.append(line[cursor:m.start()])
+            pieces.append(replacement)
+            cursor = m.end()
+            rewrote = True
+        elif res.status == "ambiguous" and old_id in res.candidates:
+            warnings.append(
+                f"{page_id}: [[{inner}]] is already ambiguous "
+                f"(matches {', '.join(res.candidates)}); skipping rewrite"
+            )
+
+    if not rewrote:
+        return line, False, warnings
+
+    pieces.append(line[cursor:])
+    new_line = "".join(pieces)
+    # Don't report no-op rewrites (bare slug -> bare slug when the
+    # preferred form is unchanged after the move).
+    if new_line == line:
+        return line, False, warnings
+    return new_line, True, warnings
 
 
 def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
@@ -336,7 +477,7 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
             error=f"destination already exists: content/{new_id}",
         )
 
-    refs = _scan_entity_refs(project, old_id, new_id)
+    refs, warnings = _scan_entity_refs(project, old_id, new_id)
 
     return MovePlan(
         old_id=old_id,
@@ -344,6 +485,7 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
         old_dir=old_dir,
         new_dir=new_dir,
         refs=refs,
+        warnings=warnings,
     )
 
 
@@ -402,7 +544,7 @@ def plan_move_collection(project: Path, collection_path: str, new_parent: str) -
             error=f"destination already exists: content/{new_id}",
         )
 
-    refs = _scan_collection_refs(project, old_id, new_id)
+    refs, warnings = _scan_collection_refs(project, old_id, new_id)
 
     return MovePlan(
         old_id=old_id,
@@ -410,6 +552,7 @@ def plan_move_collection(project: Path, collection_path: str, new_parent: str) -
         old_dir=old_dir,
         new_dir=new_dir,
         refs=refs,
+        warnings=warnings,
     )
 
 
@@ -689,35 +832,43 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
         )
 
     # ------------------------------------------------------------------
-    # Build candidate list: (match_text, wikilink_target)
+    # Build candidate list: (match_text, wikilink_target, is_kind)
     # Longer names first so "Mundus Frame" is tested before "Mundus".
     # Exclude the article itself from the candidate pool.
     # ------------------------------------------------------------------
     article_id_norm = article_path.rstrip("/")
-    candidates: list[tuple[str, str]] = []
+    candidates: list[tuple[str, str, bool]] = []
 
     for name, entity_id in collect_namespace_entities(project, namespace_path):
         if entity_id == article_id_norm:
             continue
-        candidates.append((name, entity_id))
+        candidates.append((name, entity_id, False))
 
     for match_text, kind_target in collect_all_kinds(project):
-        candidates.append((match_text, kind_target))
+        candidates.append((match_text, kind_target, True))
 
     # Sort longest-first to prefer specific matches over shorter substrings
     candidates.sort(key=lambda c: len(c[0]), reverse=True)
 
     # ------------------------------------------------------------------
+    # Build a wikilink index and figure out the article's cluster so
+    # we can emit short forms when they resolve unambiguously.
+    # ------------------------------------------------------------------
+    from .wikilinks import build_index, cluster_of, preferred_form
+    index = build_index(project)
+    article_cluster = cluster_of(article_id_norm, index)
+
+    # ------------------------------------------------------------------
     # Compile patterns (whole-word, case-sensitive)
     # ------------------------------------------------------------------
-    patterns: list[tuple[re.Pattern[str], str, str]] = []
+    patterns: list[tuple[re.Pattern[str], str, str, bool]] = []
     seen_texts: set[str] = set()
-    for match_text, target in candidates:
+    for match_text, target, is_kind_target in candidates:
         if match_text in seen_texts:
             continue
         seen_texts.add(match_text)
         pat = re.compile(r"\b" + re.escape(match_text) + r"\b")
-        patterns.append((pat, match_text, target))
+        patterns.append((pat, match_text, target, is_kind_target))
 
     # ------------------------------------------------------------------
     # Walk the article line-by-line; build edits.
@@ -749,7 +900,7 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
             continue
         new_line = line
 
-        for pat, match_text, target in patterns:
+        for pat, match_text, target, is_kind_target in patterns:
             if match_text in linked_texts:
                 continue
 
@@ -768,14 +919,20 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
             if _is_in_span(start, length, spans):
                 continue
 
-            # Build the replacement wikilink.
-            # Use bare [[target]] when the target's last segment equals match_text,
-            # otherwise use [[target|match_text]].
-            target_leaf = target.split("/")[-1]
-            if target_leaf == match_text:
-                replacement = f"[[{target}]]"
+            # Choose the shortest valid wikilink path.
+            # Kind targets (kinds/<slug>) are always written as-is —
+            # they live outside the cluster system and the registry
+            # handles resolution.
+            if is_kind_target:
+                link_path = target
             else:
-                replacement = f"[[{target}|{match_text}]]"
+                link_path = preferred_form(target, article_cluster, index)
+
+            link_leaf = link_path.split("/")[-1]
+            if link_leaf == match_text:
+                replacement = f"[[{link_path}]]"
+            else:
+                replacement = f"[[{link_path}|{match_text}]]"
 
             new_line = new_line[:start] + replacement + new_line[start + length:]
 
@@ -828,6 +985,7 @@ class RenamePlan:
     new_dir: Path           # absolute path of the folder after rename
     is_kind: bool           # True if renaming a kind, False if a content entity
     refs: list[MoveRef] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     error: str = ""
 
 
@@ -949,8 +1107,18 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
     else:
         old_id = str(old_dir.relative_to(content))
         new_id = str(new_dir.relative_to(content))
-        refs = _scan_entity_refs(project, old_id, new_id)
+        refs, warnings = _scan_entity_refs(project, old_id, new_id)
 
+    if not is_kind:
+        return RenamePlan(
+            old_id=old_id,
+            new_id=new_id,
+            old_dir=old_dir,
+            new_dir=new_dir,
+            is_kind=is_kind,
+            refs=refs,
+            warnings=warnings,
+        )
     return RenamePlan(
         old_id=old_id,
         new_id=new_id,
@@ -1060,7 +1228,7 @@ def plan_rename_collection(project: Path, old_path: str, new_slug: str) -> Renam
     old_id = str(old_dir.relative_to(content))
     new_id = str(new_dir.relative_to(content))
     
-    refs: list[MoveRef] = _scan_collection_refs(project, old_id, new_id)
+    refs, warnings = _scan_collection_refs(project, old_id, new_id)
     
     # Update _collection.md title if it appears to derive from the old slug.
     collection_md = old_dir / "_collection.md"
@@ -1076,6 +1244,7 @@ def plan_rename_collection(project: Path, old_path: str, new_slug: str) -> Renam
         new_dir=new_dir,
         is_kind=False,
         refs=refs,
+        warnings=warnings,
     )
 
 
@@ -1083,67 +1252,143 @@ def _scan_collection_refs(
     project: Path,
     old_collection_id: str,
     new_collection_id: str,
-) -> list[MoveRef]:
+) -> tuple[list[MoveRef], list[str]]:
     """
-    Scan the project for references whose path starts with *old_collection_id*
-    (as a path prefix) and produce one MoveRef per affected line, with all
-    occurrences on that line rewritten to use *new_collection_id*.
-    
+    Scan the project for references to any entity living under
+    *old_collection_id* (the collection itself or any descendant) and
+    produce one MoveRef per affected line with all qualifying
+    occurrences on that line rewritten to point under
+    *new_collection_id*.
+
+    Wikilinks are resolved using the full WIKILINKS.md contract — bare
+    slugs, suffix paths, and full paths are all handled. The
+    replacement form for each link is chosen by
+    :func:`wikilinks.preferred_form` from the rendering page's
+    cluster, so links stay as short as safely possible after the
+    cascade.
+
     Matches:
-      - ``target: <old-collection-id>/<...>`` in entity index.md files
-      - ``[[<old-collection-id>/<...>...]]`` wikilinks in entity index.md bodies
-      - ``href="/<old-collection-id>/<...>"`` in SVG files under assets/
+      - ``target: <descendant-id>`` lines in entity frontmatter
+        (anywhere the resolved descendant lives under the old
+        collection id).
+      - ``[[<link>]]`` tokens in entity bodies that resolve to an
+        entity under the old collection id.
+      - ``href="/<old-collection-id>/<...>"`` in SVG files under
+        assets/ (path-prefix rewrite — SVG hrefs aren't
+        cluster-aware).
     """
+    from .wikilinks import (
+        WIKILINK_RE,
+        build_index,
+        cluster_of,
+        parse_wikilink,
+        preferred_form,
+        render_wikilink,
+        resolve,
+    )
+
     content = content_root(project).resolve()
     refs: list[MoveRef] = []
-    
-    # target: <old-collection-id>/<descendant-path>
+    warnings: list[str] = []
+
+    index = build_index(project)
+    old_prefix = old_collection_id + "/"
+
+    def cascade(eid: str) -> str:
+        """Map a pre-move entity id to its post-move id, or return as-is."""
+        if eid == old_collection_id:
+            return new_collection_id
+        if eid.startswith(old_prefix):
+            return new_collection_id + "/" + eid[len(old_prefix):]
+        return eid
+
+    # Build a post-move index snapshot so preferred_form sees the
+    # cascaded ids when picking replacement forms.
+    renames = {eid: cascade(eid) for eid in index.entity_ids if cascade(eid) != eid}
+    post_index = index.with_renamed_ids(renames)
+
+    # target: <id-under-old-collection>  (frontmatter only).
+    # Match the full id token greedily — we cascade based on prefix.
     target_re = re.compile(
-        r"(?P<prefix>^\s*target:\s*)(?P<id>"
+        r"^(?P<prefix>\s*target:\s*)(?P<id>"
         + re.escape(old_collection_id)
-        + r"/[A-Za-z0-9_\-/]+)(?P<suffix>.*)$"
+        + r"(?:/[A-Za-z0-9_\-/]+)?)(?P<suffix>\s*)$"
     )
-    # [[<old-collection-id>/<descendant-path>...]]  — wikilinks must contain
-    # at least one more path segment after the collection id.
-    wikilink_re = re.compile(
-        r"\[\[" + re.escape(old_collection_id) + r"/(?P<rest>[^\]\|#]+)(?P<term>[|\]#])"
-    )
+
+    for md_file in iter_entity_md_files(content):
+        page_id = str(md_file.parent.relative_to(content))
+        page_cluster = cluster_of(page_id, index)
+        text = md_file.read_text(encoding="utf-8")
+        fm, _body = split_frontmatter(text)
+        fm_line_count = 0
+        if fm is not None:
+            fm_line_count = len(fm.splitlines()) + 2
+
+        lines = text.splitlines()
+        for i, line in enumerate(lines, start=1):
+            in_frontmatter = i <= fm_line_count
+
+            if in_frontmatter:
+                m = target_re.match(line)
+                if m:
+                    new_id = cascade(m.group("id"))
+                    if new_id != m.group("id"):
+                        new_line = m.group("prefix") + new_id + m.group("suffix")
+                        refs.append(MoveRef(md_file, i, line, new_line))
+                continue
+
+            if "[[" not in line:
+                continue
+
+            line_stripped = line.strip()
+            is_directive_line = (
+                line_stripped.startswith("[[collection:")
+                and line_stripped.endswith("]]")
+                and line_stripped.count("[[") == 1
+            )
+
+            pieces: list[str] = []
+            cursor = 0
+            rewrote = False
+            for m in WIKILINK_RE.finditer(line):
+                inner = m.group("inner")
+                allow_collection = is_directive_line and m.group(0) == line_stripped
+                parsed = parse_wikilink(inner, allow_collection=allow_collection)
+                if parsed.kind in ("literal", "same-page", "kind"):
+                    continue
+                res = resolve(parsed, page_cluster, index)
+                if res.status != "resolved":
+                    if res.status == "ambiguous":
+                        # Was any candidate inside the moved collection?
+                        if any(c == old_collection_id or c.startswith(old_prefix)
+                               for c in res.candidates):
+                            warnings.append(
+                                f"{page_id}: [[{inner}]] is already ambiguous "
+                                f"(matches {', '.join(res.candidates)}); skipping rewrite"
+                            )
+                    continue
+                resolved_id = res.entity_id
+                if resolved_id != old_collection_id and not resolved_id.startswith(old_prefix):
+                    continue
+                new_id = cascade(resolved_id)
+                new_path = preferred_form(new_id, page_cluster, post_index)
+                if parsed.kind == "collection":
+                    replacement = f"[[collection:{new_path}]]"
+                else:
+                    replacement = render_wikilink(new_path, parsed.anchor, parsed.label)
+                pieces.append(line[cursor:m.start()])
+                pieces.append(replacement)
+                cursor = m.end()
+                rewrote = True
+            if rewrote:
+                pieces.append(line[cursor:])
+                refs.append(MoveRef(md_file, i, line, "".join(pieces)))
+
     # SVG href="/<old-collection-id>/<...>"
     svg_href_re = re.compile(
         r'(?P<pre>href=")/' + re.escape(old_collection_id)
         + r'/(?P<rest>[^"\s/]+(?:/[^"\s]*)?)(?P<post>["\s])'
     )
-    
-    def rewrite_line(line: str) -> str:
-        new_line = line
-        # target: replacement (anchored, single match per line)
-        m = target_re.match(new_line)
-        if m:
-            new_line = (
-                m.group("prefix")
-                + new_collection_id
-                + m.group("id")[len(old_collection_id):]
-                + m.group("suffix")
-            )
-        # wikilink replacements (may be multiple per line)
-        new_line = wikilink_re.sub(
-            lambda mm: f"[[{new_collection_id}/{mm.group('rest')}{mm.group('term')}",
-            new_line,
-        )
-        # svg href replacements (may be multiple per line)
-        new_line = svg_href_re.sub(
-            lambda mm: f'{mm.group("pre")}/{new_collection_id}/{mm.group("rest")}{mm.group("post")}',
-            new_line,
-        )
-        return new_line
-    
-    for md_file in iter_entity_md_files(content):
-        lines = md_file.read_text(encoding="utf-8").splitlines()
-        for i, line in enumerate(lines, start=1):
-            new_line = rewrite_line(line)
-            if new_line != line:
-                refs.append(MoveRef(md_file, i, line, new_line))
-    
     assets = assets_root(project)
     if assets.is_dir():
         for svg_file in assets.rglob("*.svg"):
@@ -1156,8 +1401,8 @@ def _scan_collection_refs(
                     )
                     if new_line != line:
                         refs.append(MoveRef(svg_file, i, line, new_line))
-    
-    return refs
+
+    return refs, warnings
 
 
 def _slug_to_title(slug: str) -> str:

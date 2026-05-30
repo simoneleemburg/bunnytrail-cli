@@ -549,6 +549,11 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session:
         else:
             print("  No references found — only the folder will move.")
 
+    if getattr(plan, "warnings", None):
+        print(f"\n  Warnings ({len(plan.warnings)}):")
+        for w in plan.warnings:
+            print(f"    ! {w}")
+
     confirm = _ask(session, "\n  Proceed? [y/N]")
     if not confirm or confirm.lower() not in ("y", "yes"):
         print("  Cancelled.")
@@ -621,6 +626,11 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
             print(f"      + {ref.new_text.strip()}")
     else:
         print("  No references found — only the folder will be renamed.")
+
+    if getattr(plan, "warnings", None):
+        print(f"\n  Warnings ({len(plan.warnings)}):")
+        for w in plan.warnings:
+            print(f"    ! {w}")
 
     confirm = _ask(session, "\n  Proceed? [y/N]")
     if not confirm or confirm.lower() not in ("y", "yes"):

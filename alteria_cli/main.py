@@ -333,6 +333,11 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
     else:
         click.echo("\nNo references found — only the folder will be renamed.")
 
+    if plan.warnings:
+        click.echo(f"\nWarnings ({len(plan.warnings)}):")
+        for w in plan.warnings:
+            click.echo(f"  ! {w}")
+
     if dry_run:
         click.echo("\n(dry run — no files changed)")
         return
@@ -410,6 +415,11 @@ def move(ctx: click.Context, entity_path: str, new_parent: str, is_kind: bool, d
             click.echo("\nNo reference rewrites needed (kinds are referenced by slug).")
         else:
             click.echo("\nNo references found — only the folder will move.")
+
+    if plan.warnings:
+        click.echo(f"\nWarnings ({len(plan.warnings)}):")
+        for w in plan.warnings:
+            click.echo(f"  ! {w}")
 
     if dry_run:
         click.echo("\n(dry run — no files changed)")
