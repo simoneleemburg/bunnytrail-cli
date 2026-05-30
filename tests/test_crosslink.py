@@ -383,3 +383,77 @@ def test_pnp_links_whole_phrase_when_it_is_a_candidate(project: Path) -> None:
     # Make sure we did NOT also wrap 'Sharazan' as a nested/adjacent
     # link.
     assert body.count("[[sharazan") == 1, body
+
+
+# ---------------------------------------------------------------------------
+# First-occurrence rule honours existing wikilinks
+# ---------------------------------------------------------------------------
+#
+# Authors sometimes write the wikilink themselves on the first mention
+# of a term and expect the auto-linker to leave subsequent mentions
+# alone.  Without seeding `linked_texts` from the existing body, the
+# matcher would still hunt for the next plain occurrence of the
+# display name and link it — producing two links to the same target.
+
+
+def test_existing_wikilink_suppresses_later_auto_link_same_line(project: Path) -> None:
+    # 'Sharazan' is linkable.  An author has already written
+    # [[sharazan|Sharazan]] earlier on the line; the bare 'Sharazan'
+    # later on the same line must NOT be auto-linked.
+    _set_body(
+        project, "aurethia/people/duskmere",
+        "We met at [[sharazan|Sharazan]]; later, Sharazan glowed.\n",
+    )
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    if plan.edits:
+        execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    # Exactly one wikilink to sharazan, the original one.
+    assert body.count("[[sharazan") == 1, body
+
+
+def test_existing_wikilink_suppresses_later_auto_link_different_lines(project: Path) -> None:
+    # Same rule across line boundaries.
+    _set_body(
+        project, "aurethia/people/duskmere",
+        "First, we found [[sharazan|Sharazan]].\n"
+        "\n"
+        "Later that year, Sharazan was abandoned.\n",
+    )
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    if plan.edits:
+        execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert body.count("[[sharazan") == 1, body
+
+
+def test_existing_bare_wikilink_also_suppresses(project: Path) -> None:
+    # A bare [[sharazan]] (no label) renders as 'sharazan' but still
+    # points at the same target — it must suppress a later 'Sharazan'.
+    _set_body(
+        project, "aurethia/people/duskmere",
+        "I went to [[sharazan]] yesterday.\n"
+        "Sharazan was quiet at dawn.\n",
+    )
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    if plan.edits:
+        execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert body.count("[[sharazan") == 1, body
+
+
+def test_existing_kind_link_suppresses_singular_and_plural(project: Path) -> None:
+    # The 'human' kind has both 'human' and 'humans' as candidates.
+    # An existing [[kinds/human|humans]] should suppress both.
+    _set_body(
+        project, "aurethia/people/duskmere",
+        "Many [[kinds/human|humans]] live here.\n"
+        "Each human has a story; humans gather at dusk.\n",
+    )
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    if plan.edits:
+        execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    # Exactly one kind link to human; neither 'human' nor 'humans' got
+    # a second wrap.
+    assert body.count("[[kinds/human") == 1, body

@@ -1257,31 +1257,39 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
             # No closing fence — treat the whole file as body.
             body_start_idx = 0
 
-    # Track which candidate names have already been linked (first-only rule)
+    # Track which candidate names have already been linked (first-only rule).
+    # Pre-seeded below from existing wikilinks in the body so a manual
+    # [[identity|Identity]] earlier in the article suppresses any later
+    # auto-linking of the bare word "Identity".
     linked_texts: set[str] = set()
+
+    # Build a target-id -> set of display-name strings map so we can ask
+    # "does this existing wikilink point at an entity/kind whose display
+    # name is one of our candidates?".  Multiple candidates can share a
+    # target (kinds register both singular and plural), so the value is
+    # a set.
+    target_to_names: dict[str, set[str]] = {}
+    for cand_name, cand_target, _is_kind in candidates:
+        target_to_names.setdefault(cand_target, set()).add(cand_name)
 
     edits: list[CrosslinkEdit] = []
 
-    for line_idx, line in enumerate(lines):
-        if line_idx < body_start_idx:
-            continue
-        # Skip ATX headings entirely.  Linking inside a heading pollutes
-        # the rendered table of contents and rarely adds navigation
-        # value (the heading itself already anchors the section).
+    # ------------------------------------------------------------------
+    # Pass 1 (full body): simplify every existing wikilink to its
+    # preferred_form, AND collect the targets of all surviving wikilinks
+    # so the first-occurrence rule honours manual links written by the
+    # author.  Without this seeding, a paragraph that already contains
+    # [[identity|Identity]] would still get a second `Identity` further
+    # down the article auto-linked, which the user explicitly wants to
+    # avoid.
+    # ------------------------------------------------------------------
+    simplified: list[str] = list(lines)
+    for line_idx in range(body_start_idx, len(lines)):
+        line = simplified[line_idx]
         if line.lstrip().startswith("#"):
             continue
-        new_line = line
-        warn_on_line: list[str] = []
-
-        # ----------------------------------------------------------------
-        # Pass 1: simplify existing wikilinks to their preferred_form.
-        # Rewrites e.g. [[foundation/fabric/primitives/mundus|Mundus]]
-        # to [[mundus|Mundus]] when bare is unambiguous from this page.
-        # Kind links, lang tags, same-page anchors, and collection
-        # directives are left alone. Anchors and labels are preserved.
-        # ----------------------------------------------------------------
-        new_line = _simplify_wikilinks_on_line(
-            new_line,
+        simplified[line_idx] = _simplify_wikilinks_on_line(
+            line,
             article_cluster=article_cluster,
             index=index,
             parse_wikilink=parse_wikilink,
@@ -1289,6 +1297,37 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
             render_wikilink=render_wikilink,
             wikilink_re=WIKILINK_RE,
         )
+
+    # Seed `linked_texts` from existing wikilinks in the simplified body.
+    # We resolve each link with the same machinery the renderer uses;
+    # any unresolvable / kind / lang / collection link is ignored for
+    # seeding purposes.
+    for line_idx in range(body_start_idx, len(lines)):
+        line = simplified[line_idx]
+        if line.lstrip().startswith("#"):
+            continue
+        for m in WIKILINK_RE.finditer(line):
+            parsed = parse_wikilink(m.group("inner"))
+            if parsed.kind in ("path", "lang"):
+                # `lang` is the parser's tentative classification for
+                # any all-lowercase short slug — the resolver makes the
+                # final call against the index, so a `[[sharazan]]`
+                # that happens to fit the lang-tag shape still resolves
+                # to the entity if no language registers that code.
+                res = resolve(parsed, article_cluster, index)
+                if res.status == "resolved":
+                    linked_texts.update(target_to_names.get(res.entity_id, ()))
+            elif parsed.kind == "kind":
+                # Kind links use `kinds/<slug>` as their path *and* as
+                # the candidate target string, so the lookup is direct.
+                linked_texts.update(target_to_names.get(parsed.path, ()))
+
+    for line_idx in range(body_start_idx, len(lines)):
+        line = lines[line_idx]
+        if line.lstrip().startswith("#"):
+            continue
+        new_line = simplified[line_idx]
+        warn_on_line: list[str] = []
 
         # ----------------------------------------------------------------
         # Pass 2: insert new wikilinks for unlinked mentions.
