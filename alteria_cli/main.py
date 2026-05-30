@@ -604,7 +604,7 @@ def crosslink(
         f"{total_edits} line(s) affected:"
     )
     for p in actionable:
-        click.echo(f"\n  content/{p.article_id}/index.md")
+        click.echo(f"\n  content/{p.article_id}/{p.md_file.name}")
         for edit in p.edits:
             click.echo(f"    line {edit.line_no}:")
             old_line, new_line = format_diff_pair(
@@ -640,18 +640,20 @@ def _print_crosslink_warnings(plans) -> None:
     prints one section grouped by term, listing every article/line
     where the term was auto-linked.  Silent when no warnings fired.
     """
-    by_term: dict[str, list[tuple[str, int]]] = {}
+    by_term: dict[str, list[tuple[str, str, int]]] = {}
     for plan in plans:
         for edit in plan.edits:
             for term in edit.warn_terms:
-                by_term.setdefault(term, []).append((plan.article_id, edit.line_no))
+                by_term.setdefault(term, []).append(
+                    (plan.article_id, plan.md_file.name, edit.line_no)
+                )
     if not by_term:
         return
     click.echo("\nWarnings (terms flagged in content_meta/crosslink.yml `warn:`):")
     for term in sorted(by_term):
         click.echo(f"  '{term}' linked in:")
-        for article_id, line_no in by_term[term]:
-            click.echo(f"    content/{article_id}/index.md:{line_no}")
+        for article_id, md_name, line_no in by_term[term]:
+            click.echo(f"    content/{article_id}/{md_name}:{line_no}")
 
 
 # ---------------------------------------------------------------------------

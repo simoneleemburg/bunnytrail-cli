@@ -1151,25 +1151,34 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
     content = content_root(project).resolve()
     article_dir = (content / article_path).resolve()
 
+    # Resolve which markdown file we're editing.  An "article" for
+    # crosslinking purposes is either:
+    #   * an entity folder (has index.md with frontmatter) — md_file
+    #     is index.md; or
+    #   * a collection folder (has _collection.md) — md_file is
+    #     _collection.md.  Frontmatter is title/description; body
+    #     prose, if any, is what we link.
+    # We probe in that order so an entity whose folder also happens
+    # to contain a stray _collection.md (shouldn't happen but) wins.
     if not article_dir.is_dir():
         return CrosslinkPlan(
             article_id=article_path, md_file=article_dir / "index.md",
             namespace=namespace_path,
             error=f"article not found: content/{article_path}",
         )
-    if not is_entity_folder(article_dir):
+    if is_entity_folder(article_dir):
+        md_file = article_dir / "index.md"
+    elif is_collection_folder(article_dir):
+        md_file = article_dir / "_collection.md"
+    else:
         return CrosslinkPlan(
             article_id=article_path, md_file=article_dir / "index.md",
             namespace=namespace_path,
-            error=f"not an entity folder (no index.md with frontmatter): content/{article_path}",
-        )
-
-    md_file = article_dir / "index.md"
-    if not md_file.is_file():
-        return CrosslinkPlan(
-            article_id=article_path, md_file=md_file,
-            namespace=namespace_path,
-            error=f"article has no index.md: content/{article_path}",
+            error=(
+                f"not an entity or collection folder "
+                f"(no index.md with frontmatter or _collection.md): "
+                f"content/{article_path}"
+            ),
         )
 
     ns_dir = content / namespace_path
@@ -1463,18 +1472,31 @@ def plan_crosslink_folder(
     if not ns_dir.is_dir():
         return [], f"namespace not found: content/{namespace_path}"
 
-    # Single-entity case: keep the simple plan_crosslink path.
-    if is_entity_folder(target_dir):
+    # Single-target case: route directly to plan_crosslink, which
+    # handles both entity and collection folders.
+    if is_entity_folder(target_dir) or is_collection_folder(target_dir):
         return [plan_crosslink(project, target_path, namespace_path)], ""
 
-    # Folder case: walk and plan each descendant entity.
+    # Folder case: walk and plan each descendant entity AND every
+    # descendant collection.  Collection bodies are typically empty
+    # today but the same matching rules apply when they aren't.
     plans: list[CrosslinkPlan] = []
+    seen_ids: set[str] = set()
     for md_file in sorted(iter_entity_md_files(target_dir)):
         entity_id = str(md_file.parent.relative_to(content))
+        if entity_id in seen_ids:
+            continue
+        seen_ids.add(entity_id)
         plans.append(plan_crosslink(project, entity_id, namespace_path))
+    for collection_md in sorted(target_dir.rglob("_collection.md")):
+        collection_id = str(collection_md.parent.relative_to(content))
+        if collection_id in seen_ids:
+            continue
+        seen_ids.add(collection_id)
+        plans.append(plan_crosslink(project, collection_id, namespace_path))
 
     if not plans:
-        return [], f"no entities found under content/{target_path}"
+        return [], f"no entities or collections found under content/{target_path}"
 
     return plans, ""
 

@@ -765,7 +765,7 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
         f"{total_edits} line(s) affected:"
     )
     for p in actionable:
-        print(f"\n    content/{p.article_id}/index.md")
+        print(f"\n    content/{p.article_id}/{p.md_file.name}")
         for edit in p.edits:
             print(f"      line {edit.line_no}:")
             old_line, new_line = format_diff_pair(
@@ -815,18 +815,20 @@ def _print_collisions(plan) -> None:
 
 def _print_crosslink_warnings(plans) -> None:
     """Surface any ``warn:`` terms that were linked, grouped by term."""
-    by_term: dict[str, list[tuple[str, int]]] = {}
+    by_term: dict[str, list[tuple[str, str, int]]] = {}
     for plan in plans:
         for edit in plan.edits:
             for term in edit.warn_terms:
-                by_term.setdefault(term, []).append((plan.article_id, edit.line_no))
+                by_term.setdefault(term, []).append(
+                    (plan.article_id, plan.md_file.name, edit.line_no)
+                )
     if not by_term:
         return
     print("\n  Warnings (terms flagged in content_meta/crosslink.yml `warn:`):")
     for term in sorted(by_term):
         print(f"    '{term}' linked in:")
-        for article_id, line_no in by_term[term]:
-            print(f"      content/{article_id}/index.md:{line_no}")
+        for article_id, md_name, line_no in by_term[term]:
+            print(f"      content/{article_id}/{md_name}:{line_no}")
 
 
 def _cmd_help() -> None:

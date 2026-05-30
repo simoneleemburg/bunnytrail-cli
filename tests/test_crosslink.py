@@ -114,7 +114,7 @@ def test_crosslink_folder_empty_directory_reports_no_entities(
         project, "aurethia/empty-shelf", "aurethia/places"
     )
     assert plans == []
-    assert "no entities found" in err
+    assert "no entities or collections found" in err
 
 
 def test_crosslink_folder_missing_namespace(project: Path) -> None:
@@ -457,3 +457,108 @@ def test_existing_kind_link_suppresses_singular_and_plural(project: Path) -> Non
     # Exactly one kind link to human; neither 'human' nor 'humans' got
     # a second wrap.
     assert body.count("[[kinds/human") == 1, body
+
+
+# ---------------------------------------------------------------------------
+# _collection.md support
+# ---------------------------------------------------------------------------
+#
+# Crosslink treats collection pages as articles too — body prose on a
+# _collection.md is auto-linked using the same rules as an entity's
+# index.md.  Folder mode picks them up alongside index.md files.
+
+
+def _set_collection_body(project: Path, collection_id: str, body: str) -> None:
+    """Replace the body of a _collection.md (keeping its frontmatter)."""
+    md = project / "content" / collection_id / "_collection.md"
+    text = md.read_text(encoding="utf-8")
+    head, _, _ = text.partition("\n---\n")
+    md.write_text(head + "\n---\n" + body, encoding="utf-8")
+
+
+def _read_collection_body(project: Path, collection_id: str) -> str:
+    md = project / "content" / collection_id / "_collection.md"
+    text = md.read_text(encoding="utf-8")
+    _, _, body = text.partition("\n---\n")
+    return body
+
+
+def test_crosslink_collection_body_gets_linked(project: Path) -> None:
+    # The aurethia/places/bayurinda collection has a _collection.md.
+    # Put some body prose on it mentioning Sharazan and Nuunlau (both
+    # entities under aurethia/places).
+    _set_collection_body(
+        project, "aurethia/places/bayurinda",
+        "The archipelago contains Nuunlau and looks toward Sharazan.\n",
+    )
+    plan = plan_crosslink(project, "aurethia/places/bayurinda", "aurethia/places")
+    assert plan.error == "", plan.error
+    execute_crosslink(plan)
+    body = _read_collection_body(project, "aurethia/places/bayurinda")
+    # bayurinda is in cluster aurethia, so bare slugs work.  Nuunlau
+    # is nested under bayurinda but suffix-matching makes the bare
+    # form unambiguous from this page.
+    assert "[[nuunlau|Nuunlau]]" in body, body
+    assert "[[sharazan|Sharazan]]" in body, body
+
+
+def test_crosslink_collection_frontmatter_is_not_touched(project: Path) -> None:
+    # Mention 'Bayurinda' inside the description (frontmatter).  Body
+    # is empty.  Crosslink must NOT rewrite frontmatter even when the
+    # text matches a candidate.
+    md = project / "content" / "aurethia" / "places" / "bayurinda" / "_collection.md"
+    md.write_text(
+        "---\n"
+        "title: Bayurinda\n"
+        "description: >-\n"
+        "  Sharazan, Nuunlau, and the islands between.\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    plan = plan_crosslink(project, "aurethia/places/bayurinda", "aurethia/places")
+    assert plan.error == "", plan.error
+    # No body prose to link — frontmatter mentions of Sharazan/Nuunlau
+    # must be ignored.
+    assert plan.edits == [], [(e.line_no, e.new_text) for e in plan.edits]
+
+
+def test_crosslink_folder_walks_collection_files(project: Path) -> None:
+    # Folder mode should produce plans for BOTH index.md and
+    # _collection.md descendants.  Put body prose on a collection so
+    # there's something to link.
+    _set_collection_body(
+        project, "aurethia/places/bayurinda",
+        "Looks toward Sharazan.\n",
+    )
+    # Also put prose on an entity so we exercise both paths.
+    _set_body(
+        project, "aurethia/places/sharazan",
+        "Once visited by Nuunlau.\n",
+    )
+    plans, err = plan_crosslink_folder(
+        project, "aurethia/places", "aurethia/places",
+    )
+    assert err == "", err
+    article_ids = {p.article_id for p in plans if p.edits}
+    assert "aurethia/places/bayurinda" in article_ids
+    assert "aurethia/places/sharazan" in article_ids
+
+
+def test_crosslink_collection_self_exclusion(project: Path) -> None:
+    # A collection should not generate a wikilink that points at
+    # itself.  Even though collections aren't auto-link CANDIDATES
+    # today, this guards the article_id_norm self-exclusion path in
+    # case that changes.  Use a candidate entity that DOES exist
+    # ('Sharazan') alongside the collection's own title to confirm
+    # the matcher runs but doesn't trip on the article id.
+    _set_collection_body(
+        project, "aurethia/places/bayurinda",
+        "Bayurinda contains Sharazan.\n",
+    )
+    plan = plan_crosslink(project, "aurethia/places/bayurinda", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_collection_body(project, "aurethia/places/bayurinda")
+    assert "[[sharazan|Sharazan]]" in body
+    # 'Bayurinda' is not a candidate (collections aren't in the pool),
+    # so it stays plain text.
+    assert "[[bayurinda" not in body, body
