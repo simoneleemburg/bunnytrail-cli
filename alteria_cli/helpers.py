@@ -652,12 +652,82 @@ def execute_move(plan: MovePlan) -> None:
 # Crosslink — insert wikilinks into an article's prose
 # ---------------------------------------------------------------------------
 
+# Path to the optional crosslink-policy config file, relative to a
+# project root.  Two top-level keys are recognised:
+#
+#   never:  list of exact display names that must never be auto-linked.
+#   warn:   list of exact display names that may be linked, but should be
+#           surfaced after a run so the user can decide whether to demote
+#           them to `never:`.
+#
+# Both lists are matched case-sensitively against the same strings the
+# crosslinker would otherwise turn into wikilinks (a kind's singular/
+# plural, or an entity's display name).
+_CROSSLINK_CONFIG_PATH = "content_meta/crosslink.yml"
+
+
+@dataclass
+class CrosslinkConfig:
+    """Parsed contents of ``content_meta/crosslink.yml``."""
+    never: set[str] = field(default_factory=set)
+    warn: set[str] = field(default_factory=set)
+
+
+def load_crosslink_config(project: Path) -> CrosslinkConfig:
+    """Load ``content_meta/crosslink.yml`` (if present).
+
+    Missing file → empty config (no filters, no warnings).  Parsing is
+    deliberately lenient: only ``never:`` and ``warn:`` are read, and
+    each must be a flat list of YAML scalars.  Other keys, comments
+    and blank lines are ignored.  Unknown YAML (mappings under these
+    keys, anchors, etc.) is rejected silently — keep the file simple.
+    """
+    cfg_file = (project / _CROSSLINK_CONFIG_PATH)
+    if not cfg_file.is_file():
+        return CrosslinkConfig()
+
+    text = cfg_file.read_text(encoding="utf-8")
+    never: set[str] = set()
+    warn: set[str] = set()
+    current: "set[str] | None" = None
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+        # Top-level key (no leading whitespace)
+        if line[0] not in (" ", "\t"):
+            key, _, _rest = line.partition(":")
+            key = key.strip()
+            if key == "never":
+                current = never
+            elif key == "warn":
+                current = warn
+            else:
+                current = None
+            continue
+        # List item under the current key
+        if current is None:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            value = stripped[2:].strip().strip("\"'")
+            if value:
+                current.add(value)
+
+    return CrosslinkConfig(never=never, warn=warn)
+
+
 @dataclass
 class CrosslinkEdit:
     """A single line replacement that adds one or more wikilinks."""
     line_no: int        # 1-based
     old_text: str       # original line (without newline)
     new_text: str       # replacement line (without newline)
+    warn_terms: list[str] = field(default_factory=list)
+    # Names from the crosslink.yml `warn:` list that were linked on
+    # this line.  Surfaced at the end of the run so the user can decide
+    # whether to promote them to `never:`.
 
 
 @dataclass
@@ -889,6 +959,12 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
         )
 
     # ------------------------------------------------------------------
+    # Load the optional crosslink-policy config and apply `never` to
+    # both the entity and kind candidate pools.
+    # ------------------------------------------------------------------
+    cfg = load_crosslink_config(project)
+
+    # ------------------------------------------------------------------
     # Build candidate list: (match_text, wikilink_target, is_kind)
     # Longer names first so "Mundus Frame" is tested before "Mundus".
     # Exclude the article itself from the candidate pool.
@@ -899,9 +975,13 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
     for name, entity_id in collect_namespace_entities(project, namespace_path):
         if entity_id == article_id_norm:
             continue
+        if name in cfg.never:
+            continue
         candidates.append((name, entity_id, False))
 
     for match_text, kind_target in collect_all_kinds(project):
+        if match_text in cfg.never:
+            continue
         candidates.append((match_text, kind_target, True))
 
     # Sort longest-first to prefer specific matches over shorter substrings
@@ -963,7 +1043,13 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
     for line_idx, line in enumerate(lines):
         if line_idx < body_start_idx:
             continue
+        # Skip ATX headings entirely.  Linking inside a heading pollutes
+        # the rendered table of contents and rarely adds navigation
+        # value (the heading itself already anchors the section).
+        if line.lstrip().startswith("#"):
+            continue
         new_line = line
+        warn_on_line: list[str] = []
 
         # ----------------------------------------------------------------
         # Pass 1: simplify existing wikilinks to their preferred_form.
@@ -1022,12 +1108,15 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
             new_line = new_line[:start] + replacement + new_line[start + length:]
 
             linked_texts.add(match_text)
+            if match_text in cfg.warn:
+                warn_on_line.append(match_text)
 
         if new_line != line:
             edits.append(CrosslinkEdit(
                 line_no=line_idx + 1,
                 old_text=line,
                 new_text=new_line,
+                warn_terms=warn_on_line,
             ))
 
     return CrosslinkPlan(

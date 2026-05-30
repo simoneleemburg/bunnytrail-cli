@@ -197,3 +197,98 @@ def test_crosslink_simplification_leaves_unresolvable_links_alone(
     body = _read_body(project, "aurethia/people/duskmere")
     # Atlantis doesn't exist — leave it untouched rather than mangling it.
     assert "[[aurethia/places/atlantis|Atlantis]]" in body
+
+
+# ---------------------------------------------------------------------------
+# Heading skip + crosslink policy config
+# ---------------------------------------------------------------------------
+
+def _write_crosslink_yml(project: Path, body: str) -> None:
+    cfg = project / "content_meta" / "crosslink.yml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(body, encoding="utf-8")
+
+
+def test_crosslink_skips_headings(project: Path) -> None:
+    # Even though 'human' is a registered kind, a heading containing it
+    # must not be touched.
+    _set_body(project, "aurethia/people/duskmere",
+              "## What it is to be human\n\nShe is human.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    # Heading untouched
+    assert "## What it is to be human" in body
+    assert "[[kinds/human" not in body.split("\n", 2)[0]
+    # Body line still gets the link
+    assert "[[kinds/human|human]]" in body or "[[kinds/human]]" in body
+
+
+def test_crosslink_skips_headings_for_existing_links_too(project: Path) -> None:
+    # An existing link inside a heading must not be rewritten by the
+    # simplify pass either.
+    _set_body(project, "aurethia/people/duskmere",
+              "## See [[aurethia/places/sharazan|Sharazan]]\n\nBody.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "## See [[aurethia/places/sharazan|Sharazan]]" in body
+
+
+def test_crosslink_never_filters_kind_names(project: Path) -> None:
+    _write_crosslink_yml(project, "never:\n  - human\n")
+    _set_body(project, "aurethia/people/duskmere",
+              "She is human.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    # 'human' is in `never` → no link.
+    assert "[[kinds/human" not in body
+
+
+def test_crosslink_never_filters_entity_names(project: Path) -> None:
+    _write_crosslink_yml(project, "never:\n  - Sharazan\n")
+    _set_body(project, "aurethia/people/duskmere",
+              "We visited Sharazan today.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "Sharazan" in body
+    assert "[[sharazan" not in body
+
+
+def test_crosslink_warn_still_links_but_tags_edit(project: Path) -> None:
+    _write_crosslink_yml(project, "warn:\n  - Sharazan\n")
+    _set_body(project, "aurethia/people/duskmere",
+              "We visited Sharazan today.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    assert len(plan.edits) == 1
+    edit = plan.edits[0]
+    assert "[[sharazan|Sharazan]]" in edit.new_text
+    assert "Sharazan" in edit.warn_terms
+
+
+def test_crosslink_config_loader_missing_file(project: Path) -> None:
+    from alteria_cli.helpers import load_crosslink_config
+    cfg = load_crosslink_config(project)
+    assert cfg.never == set()
+    assert cfg.warn == set()
+
+
+def test_crosslink_config_loader_parses_lists(project: Path) -> None:
+    from alteria_cli.helpers import load_crosslink_config
+    _write_crosslink_yml(
+        project,
+        "# a comment\n"
+        "never:\n"
+        "  - Role\n"
+        "  - 'Process'\n"
+        "  - \"Object\"\n"
+        "\n"
+        "warn:\n"
+        "  - Trait\n"
+        "  - Event\n",
+    )
+    cfg = load_crosslink_config(project)
+    assert cfg.never == {"Role", "Process", "Object"}
+    assert cfg.warn == {"Trait", "Event"}

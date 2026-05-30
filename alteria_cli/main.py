@@ -520,6 +520,7 @@ def crosslink(
 
     if dry_run:
         click.echo("\n(dry run — no files changed)")
+        _print_crosslink_warnings(actionable)
         return
 
     if not yes:
@@ -533,6 +534,28 @@ def crosslink(
             sys.exit(1)
 
     click.echo(f"\nDone.  Updated {len(actionable)} article(s).")
+    _print_crosslink_warnings(actionable)
+
+
+def _print_crosslink_warnings(plans) -> None:
+    """Print a per-term summary of any `warn:` matches that were linked.
+
+    Reads ``warn_terms`` off each :class:`CrosslinkEdit` in *plans* and
+    prints one section grouped by term, listing every article/line
+    where the term was auto-linked.  Silent when no warnings fired.
+    """
+    by_term: dict[str, list[tuple[str, int]]] = {}
+    for plan in plans:
+        for edit in plan.edits:
+            for term in edit.warn_terms:
+                by_term.setdefault(term, []).append((plan.article_id, edit.line_no))
+    if not by_term:
+        return
+    click.echo("\nWarnings (terms flagged in content_meta/crosslink.yml `warn:`):")
+    for term in sorted(by_term):
+        click.echo(f"  '{term}' linked in:")
+        for article_id, line_no in by_term[term]:
+            click.echo(f"    content/{article_id}/index.md:{line_no}")
 
 
 # ---------------------------------------------------------------------------

@@ -720,6 +720,23 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
             return
 
     print(f"  Done.  Updated {len(actionable)} article(s).")
+    _print_crosslink_warnings(actionable)
+
+
+def _print_crosslink_warnings(plans) -> None:
+    """Surface any ``warn:`` terms that were linked, grouped by term."""
+    by_term: dict[str, list[tuple[str, int]]] = {}
+    for plan in plans:
+        for edit in plan.edits:
+            for term in edit.warn_terms:
+                by_term.setdefault(term, []).append((plan.article_id, edit.line_no))
+    if not by_term:
+        return
+    print("\n  Warnings (terms flagged in content_meta/crosslink.yml `warn:`):")
+    for term in sorted(by_term):
+        print(f"    '{term}' linked in:")
+        for article_id, line_no in by_term[term]:
+            print(f"      content/{article_id}/index.md:{line_no}")
 
 
 def _cmd_help() -> None:
