@@ -607,7 +607,52 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
 
     old_path = _resolve(old_path)
 
-    plan = plan_rename(project, old_path, new_slug)
+    # ------------------------------------------------------------------
+    # Detect entity vs kind so we know which display-name fields to
+    # prompt for.  These prompts default to the current value so
+    # hitting Enter is a no-op.
+    # ------------------------------------------------------------------
+    from .helpers import (
+        read_entity_display_name,
+        read_kind_display_names,
+    )
+    new_display: dict[str, str] = {}
+    entity_dir = content / old_path
+    if entity_dir.is_dir() and (entity_dir / "index.md").is_file():
+        old_name = read_entity_display_name(entity_dir)
+        if old_name:
+            answer = _ask(
+                session,
+                "new display name",
+                default=old_name,
+            )
+            if answer and answer != old_name:
+                new_display["name"] = answer
+    else:
+        kind_dir = kinds / old_path
+        if kind_dir.is_dir() and (kind_dir / "_kind.md").is_file():
+            old_singular, old_plural = read_kind_display_names(kind_dir)
+            if old_singular:
+                answer = _ask(
+                    session,
+                    "new singular",
+                    default=old_singular,
+                )
+                if answer and answer != old_singular:
+                    new_display["singular"] = answer
+            if old_plural:
+                answer = _ask(
+                    session,
+                    "new plural",
+                    default=old_plural,
+                )
+                if answer and answer != old_plural:
+                    new_display["plural"] = answer
+
+    plan = plan_rename(
+        project, old_path, new_slug,
+        new_display_names=new_display or None,
+    )
 
     if plan.error:
         print(f"  Error: {plan.error}")
@@ -617,6 +662,11 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
     id_root = "content_meta/kinds" if plan.is_kind else "content"
     print(f"  Rename {kind_label}:  {id_root}/{plan.old_id}")
     print(f"                ->  {id_root}/{plan.new_id}")
+
+    if plan.display_renames:
+        print("\n  Display name changes:")
+        for old_disp, new_disp in plan.display_renames.items():
+            print(f"    {old_disp!r} -> {new_disp!r}")
 
     if plan.refs:
         print(f"\n  References to update ({len(plan.refs)}):")

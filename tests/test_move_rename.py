@@ -171,3 +171,133 @@ def test_kind_rename_rewrites_wikilinks(project: Path) -> None:
     execute_rename(plan)
     body = _read_body(project, "aurethia/people/duskmere")
     assert "[[kinds/person]]" in body
+
+
+# ---------------------------------------------------------------------------
+# Display-name rename (entity)
+# ---------------------------------------------------------------------------
+
+def _read_frontmatter_field(project: Path, entity_id: str, field: str) -> str:
+    md = project / "content" / entity_id / "index.md"
+    text = md.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line.startswith(f"{field}:"):
+            return line.split(":", 1)[1].strip().strip("\"'")
+    return ""
+
+
+def test_entity_rename_updates_label_text_in_wikilinks(project: Path) -> None:
+    _write_body(project, "aurethia/people/duskmere",
+                "Visit [[sharazan|Sharazan]] often.\n"
+                "Also see [[sharazan|Sharazan]] later.\n")
+    plan = plan_rename(
+        project, "aurethia/places/sharazan", "sharazan-new",
+        new_display_names={"name": "Sharazan-Reborn"},
+    )
+    assert plan.error == ""
+    execute_rename(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan-new|Sharazan-Reborn]]" in body
+    assert "Sharazan" not in body.replace("Sharazan-Reborn", "")
+
+
+def test_entity_rename_updates_own_frontmatter_name(project: Path) -> None:
+    plan = plan_rename(
+        project, "aurethia/places/sharazan", "sharazan-new",
+        new_display_names={"name": "Sharazan-Reborn"},
+    )
+    assert plan.error == ""
+    execute_rename(plan)
+    assert _read_frontmatter_field(
+        project, "aurethia/places/sharazan-new", "name"
+    ) == "Sharazan-Reborn"
+
+
+def test_entity_rename_adds_label_to_bare_link_when_display_changes(
+    project: Path,
+) -> None:
+    # Bare link previously rendered as "sharazan" (the slug).  After
+    # rename, the new slug is "sharazan-new", but the chosen display
+    # is "Sharazan-Reborn" -> link should be promoted to a labelled
+    # form so prose still renders the intended display.
+    _write_body(project, "aurethia/people/duskmere",
+                "See [[sharazan]].\n")
+    plan = plan_rename(
+        project, "aurethia/places/sharazan", "sharazan-new",
+        new_display_names={"name": "Sharazan-Reborn"},
+    )
+    execute_rename(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan-new|Sharazan-Reborn]]" in body
+
+
+def test_entity_rename_without_display_change_preserves_existing_label(
+    project: Path,
+) -> None:
+    # When the user opts out of changing the display name, existing
+    # labels must be left exactly as-is.
+    _write_body(project, "aurethia/people/duskmere",
+                "Visit [[sharazan|the home town]].\n")
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    execute_rename(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan-new|the home town]]" in body
+
+
+def test_entity_rename_leaves_unrelated_labels_alone(project: Path) -> None:
+    # Another link uses "Sharazan" as a label but points elsewhere —
+    # must not be touched.
+    _write_body(project, "aurethia/people/duskmere",
+                "Visit [[sharazan|Sharazan]] often.\n"
+                "Also [[shanghai|Sharazan]] for fun.\n")  # weird but possible
+    plan = plan_rename(
+        project, "aurethia/places/sharazan", "sharazan-new",
+        new_display_names={"name": "Sharazan-Reborn"},
+    )
+    execute_rename(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    # Sharazan link gets relabelled
+    assert "[[sharazan-new|Sharazan-Reborn]]" in body
+    # Shanghai link keeps its original (off-target) label
+    assert "[[shanghai|Sharazan]]" in body or "[[earth/places/shanghai|Sharazan]]" in body
+
+
+# ---------------------------------------------------------------------------
+# Display-name rename (kind)
+# ---------------------------------------------------------------------------
+
+def test_kind_rename_updates_singular_label_in_wikilinks(project: Path) -> None:
+    _write_body(project, "aurethia/people/duskmere",
+                "She is [[kinds/human|human]].\n")
+    plan = plan_rename(
+        project, "being/human", "person",
+        new_display_names={"singular": "person", "plural": "people"},
+    )
+    assert plan.error == ""
+    execute_rename(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[kinds/person|person]]" in body
+
+
+def test_kind_rename_updates_plural_label_in_wikilinks(project: Path) -> None:
+    _write_body(project, "aurethia/people/duskmere",
+                "Many [[kinds/human|humans]] live here.\n")
+    plan = plan_rename(
+        project, "being/human", "person",
+        new_display_names={"singular": "person", "plural": "people"},
+    )
+    execute_rename(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[kinds/person|people]]" in body
+
+
+def test_kind_rename_updates_own_frontmatter(project: Path) -> None:
+    plan = plan_rename(
+        project, "being/human", "person",
+        new_display_names={"singular": "person", "plural": "people"},
+    )
+    execute_rename(plan)
+    kind_md = project / "content_meta" / "kinds" / "being" / "person" / "_kind.md"
+    text = kind_md.read_text(encoding="utf-8")
+    assert "singular: person" in text
+    assert "plural: people" in text

@@ -313,7 +313,56 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
     """
     root: Path = ctx.obj["root"]
 
-    plan = plan_rename(root, old_path.rstrip("/"), new_slug)
+    # ------------------------------------------------------------------
+    # Detect whether this is an entity / collection / kind to know
+    # which display-name fields to prompt for.  Cheap: just inspect
+    # the path on disk; plan_rename will reject anything bogus later.
+    # ------------------------------------------------------------------
+    from .helpers import (
+        content_root,
+        kinds_root,
+        read_entity_display_name,
+        read_kind_display_names,
+    )
+    cwd_content = content_root(root)
+    cwd_kinds = kinds_root(root)
+    target_dir = (cwd_content / old_path.rstrip("/")).resolve()
+    new_display: dict[str, str] = {}
+    if target_dir.is_dir() and (target_dir / "index.md").is_file():
+        old_name = read_entity_display_name(target_dir)
+        if old_name:
+            new_name = click.prompt(
+                f"  new display name (current: {old_name!r})",
+                default=old_name,
+                show_default=False,
+            )
+            if new_name and new_name != old_name:
+                new_display["name"] = new_name
+    else:
+        kind_dir = (cwd_kinds / old_path.rstrip("/")).resolve()
+        if kind_dir.is_dir() and (kind_dir / "_kind.md").is_file():
+            old_singular, old_plural = read_kind_display_names(kind_dir)
+            if old_singular:
+                ns = click.prompt(
+                    f"  new singular (current: {old_singular!r})",
+                    default=old_singular,
+                    show_default=False,
+                )
+                if ns and ns != old_singular:
+                    new_display["singular"] = ns
+            if old_plural:
+                np = click.prompt(
+                    f"  new plural (current: {old_plural!r})",
+                    default=old_plural,
+                    show_default=False,
+                )
+                if np and np != old_plural:
+                    new_display["plural"] = np
+
+    plan = plan_rename(
+        root, old_path.rstrip("/"), new_slug,
+        new_display_names=new_display or None,
+    )
 
     if plan.error:
         click.echo(f"Error: {plan.error}", err=True)
@@ -323,6 +372,11 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
     id_root = "content_meta/kinds" if plan.is_kind else "content"
     click.echo(f"Rename {kind_label}:  {id_root}/{plan.old_id}")
     click.echo(f"              ->  {id_root}/{plan.new_id}")
+
+    if plan.display_renames:
+        click.echo("\nDisplay name changes:")
+        for old_disp, new_disp in plan.display_renames.items():
+            click.echo(f"  {old_disp!r} -> {new_disp!r}")
 
     if plan.refs:
         click.echo(f"\nReferences to update ({len(plan.refs)}):")

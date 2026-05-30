@@ -233,6 +233,8 @@ def _scan_entity_refs(
     project: Path,
     old_id: str,
     new_id: str,
+    *,
+    display_renames: "dict[str, str] | None" = None,
 ) -> tuple[list[MoveRef], list[str]]:
     """Find every reference to *old_id* across the project and produce
     rewrite operations targeting *new_id*.
@@ -314,6 +316,7 @@ def _scan_entity_refs(
                 post_index=post_index,
                 old_id=old_id,
                 new_id=new_id,
+                display_renames=display_renames or {},
             )
             warnings.extend(warns)
             if rewrote:
@@ -346,6 +349,7 @@ def _rewrite_wikilinks_on_line(
     post_index,  # WikilinkIndex (post-move, for preferred_form)
     old_id: str,
     new_id: str,
+    display_renames: "dict[str, str] | None" = None,
 ) -> tuple[str, bool, list[str]]:
     """Rewrite every ``[[…]]`` on *line* whose resolved target is *old_id*.
 
@@ -355,7 +359,12 @@ def _rewrite_wikilinks_on_line(
     rendering page's cluster — bare slugs stay bare where possible,
     cross-cluster targets get full ids, and so on.
 
-    Anchors and labels on the source link are preserved verbatim.
+    Anchors are preserved verbatim.  Labels are preserved unless they
+    appear in *display_renames* (an ``old_display -> new_display``
+    map), in which case the new label is substituted.  When the link
+    is bare (no explicit label) and *display_renames* maps the old
+    leaf to a new display value, an explicit label is added so the
+    rendered text matches the renamed entity's chosen display name.
     """
     from .wikilinks import (
         WIKILINK_RE,
@@ -398,12 +407,32 @@ def _rewrite_wikilinks_on_line(
         res = resolve(parsed, page_cluster, index)
         if res.status == "resolved" and res.entity_id == old_id:
             new_path = preferred_form(new_id, page_cluster, post_index)
+            # Decide on the label.  When an explicit label is present
+            # AND it maps via display_renames, swap it.  When the link
+            # was bare and the old display name matches a renames key
+            # whose new value differs from the new path's leaf, add an
+            # explicit label so the rendered text stays correct.
+            new_label = parsed.label
+            if display_renames:
+                if parsed.label and parsed.label in display_renames:
+                    new_label = display_renames[parsed.label]
+                elif not parsed.label:
+                    # The bare-link "display" is the link's leaf slug
+                    # — but the entity's user-facing display name is
+                    # something we know from frontmatter.  If the old
+                    # display value appears in the renames map AND the
+                    # new value differs from the new leaf, force a
+                    # label.
+                    for old_disp, new_disp in display_renames.items():
+                        if new_disp != new_path.split("/")[-1]:
+                            new_label = new_disp
+                            break
             if parsed.kind == "collection":
                 # Whole-line directive — keep the directive prefix.
                 replacement = f"[[collection:{new_path}]]"
             else:
                 replacement = render_wikilink(
-                    new_path, parsed.anchor, parsed.label
+                    new_path, parsed.anchor, new_label
                 )
             pieces.append(line[cursor:m.start()])
             pieces.append(replacement)
@@ -1204,6 +1233,81 @@ def plan_crosslink_folder(
 
 # Rename reuses MoveRef for individual line edits; the plan shape is similar.
 
+
+def _rewrite_labels_inline(
+    line: str,
+    pattern: "re.Pattern[str]",
+    label_map: "dict[str, str]",
+) -> str:
+    """Rewrite the ``|Label`` portion of every ``[[…]]`` match on *line*.
+
+    *pattern* must capture a ``label`` group.  When the captured label
+    matches a key in *label_map*, that key is replaced by the mapped
+    value in the produced output; otherwise the token is left intact.
+    """
+    def _sub(m):
+        old_label = m.group("label")
+        new_label = label_map.get(old_label)
+        if new_label is None:
+            return m.group(0)
+        return m.group(0).replace(f"|{old_label}]]", f"|{new_label}]]", 1)
+    return pattern.sub(_sub, line)
+
+
+def _frontmatter_field_edits(
+    md_file: Path,
+    new_values: "dict[str, str]",
+    *,
+    current: "dict[str, str]",
+) -> "list[MoveRef]":
+    """Build :class:`MoveRef` edits that rewrite top-level scalar
+    frontmatter fields in *md_file* to *new_values*.
+
+    Only single-line ``field: value`` shapes are rewritten — block
+    scalars (``field: >-``) and nested fields are skipped silently.
+    A field whose new value equals its current value produces no edit.
+
+    *current* is used as a sanity-check: a field whose YAML line value
+    doesn't match the recorded current value is skipped, so an
+    out-of-date plan never clobbers freshly edited frontmatter.
+    """
+    refs: list[MoveRef] = []
+    try:
+        text = md_file.read_text(encoding="utf-8")
+    except OSError:
+        return refs
+    fm, _body = split_frontmatter(text)
+    if fm is None:
+        return refs
+    fm_line_count = len(fm.splitlines()) + 2  # opening/closing fences
+    lines = text.splitlines()
+    for i in range(1, fm_line_count - 1):
+        if i >= len(lines):
+            break
+        raw = lines[i]
+        # Must be a top-level scalar (no leading whitespace).
+        if not raw or raw[0] in (" ", "\t"):
+            continue
+        key, _, rest = raw.partition(":")
+        key = key.strip()
+        if key not in new_values:
+            continue
+        new_val = new_values[key]
+        if not new_val:
+            continue
+        value = rest.strip().strip("\"'")
+        if value != current.get(key, ""):
+            continue
+        if value == new_val:
+            continue
+        new_line = f"{key}: {new_val}"
+        refs.append(MoveRef(md_file, i + 1, raw, new_line))
+    return refs
+
+
+
+# Rename reuses MoveRef for individual line edits; the plan shape is similar.
+
 @dataclass
 class RenamePlan:
     """Everything needed to carry out (or preview) a rename."""
@@ -1215,9 +1319,37 @@ class RenamePlan:
     refs: list[MoveRef] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: str = ""
+    display_renames: dict[str, str] = field(default_factory=dict)
+    # Old display name -> new display name.  For entities this has one
+    # entry keyed by the old `name:` value; for kinds it has up to two
+    # entries (old singular -> new singular, old plural -> new plural).
+    # Empty when the caller didn't ask for display-name changes.
 
 
-def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
+def read_entity_display_name(entity_dir: Path) -> str:
+    """Return the ``name:`` field of an entity's ``index.md``, or ""."""
+    md = entity_dir / "index.md"
+    if not md.is_file():
+        return ""
+    return _parse_yaml_field(frontmatter_lines(md.read_text(encoding="utf-8")), "name")
+
+
+def read_kind_display_names(kind_dir: Path) -> tuple[str, str]:
+    """Return ``(singular, plural)`` from ``_kind.md``, or ``("", "")``."""
+    md = kind_dir / "_kind.md"
+    if not md.is_file():
+        return "", ""
+    lines = frontmatter_lines(md.read_text(encoding="utf-8"))
+    return _parse_yaml_field(lines, "singular"), _parse_yaml_field(lines, "plural")
+
+
+def plan_rename(
+    project: Path,
+    old_path: str,
+    new_slug: str,
+    *,
+    new_display_names: "dict[str, str] | None" = None,
+) -> RenamePlan:
     """
     Build a RenamePlan for renaming the slug of a content entity, collection, or kind.
 
@@ -1225,6 +1357,19 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
     The tool tries content/ first; if not found there it tries kinds/.
 
     *new_slug* is the new folder name only (no slashes).
+
+    *new_display_names* is an optional mapping of frontmatter field
+    name to the new value for that field.  For an entity rename use
+    ``{"name": "Harmonious"}``; for a kind rename use
+    ``{"singular": "Harmonia", "plural": "Harmonias"}``.  Any field
+    omitted keeps its current value.  When a field's new value differs
+    from its old value, the planner adds:
+
+      * a frontmatter edit on the renamed thing's own ``index.md`` (or
+        ``_kind.md``) updating the scalar;
+      * label-text rewrites on every wikilink across the project whose
+        target is the renamed thing AND whose label exactly equals the
+        old display value.
 
     For a **content entity**, updates:
       - ``target: <old-id>`` in any entity's index.md (within frontmatter)
@@ -1291,10 +1436,25 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
         )
 
     refs: list[MoveRef] = []
+    display_renames: dict[str, str] = {}
+    warnings: list[str] = []
 
     if is_kind:
         old_id = str(old_dir.relative_to(kinds))
         new_id = str(new_dir.relative_to(kinds))
+
+        # ------------------------------------------------------------------
+        # Compute display-name renames (singular / plural) and a label-
+        # rewrite map for use inside [[kinds/<slug>|Label]] wikilinks.
+        # ------------------------------------------------------------------
+        old_singular, old_plural = read_kind_display_names(old_dir)
+        if new_display_names:
+            new_singular = new_display_names.get("singular", old_singular)
+            new_plural = new_display_names.get("plural", old_plural)
+            if old_singular and new_singular and old_singular != new_singular:
+                display_renames[old_singular] = new_singular
+            if old_plural and new_plural and old_plural != new_plural:
+                display_renames[old_plural] = new_plural
 
         # 1. kind: <old-slug>  in any entity's index.md frontmatter.
         #    The kind: field stores only the leaf slug, not the full path.
@@ -1311,6 +1471,15 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
         wikilink_re = re.compile(
             r"\[\[kinds/" + re.escape(old_slug) + r"(?P<rest>[|\]#])"
         )
+        # 3b. [[kinds/<new-slug>|<old-label>]] — label-only rewrites for
+        #     links that already point at the new slug (after step 3 has
+        #     rewritten the path).  Matches both the post-rewrite case
+        #     and the case where someone manually wrote the new slug
+        #     before this rename ran.
+        labeled_kind_link_re = re.compile(
+            r"\[\[kinds/" + re.escape(new_slug) +
+            r"(?P<anchor>#[a-z0-9-]*)?\|(?P<label>[^\]\n|]+)\]\]"
+        )
 
         for md_file in iter_entity_md_files(content):
             lines = md_file.read_text(encoding="utf-8").splitlines()
@@ -1320,33 +1489,69 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
                     new_line = m.group("prefix") + new_slug + m.group("suffix")
                     refs.append(MoveRef(md_file, i, line, new_line))
                     continue
-                if affinity_re.search(line):
+                new_line = line
+                changed = False
+                if affinity_re.search(new_line):
                     new_line = affinity_re.sub(
-                        r"\g<pre>" + new_slug + r"\g<post>", line
+                        r"\g<pre>" + new_slug + r"\g<post>", new_line
                     )
-                    refs.append(MoveRef(md_file, i, line, new_line))
-                    continue
-                if wikilink_re.search(line):
+                    changed = True
+                if wikilink_re.search(new_line):
                     new_line = wikilink_re.sub(
-                        r"[[kinds/" + new_slug + r"\g<rest>", line
+                        r"[[kinds/" + new_slug + r"\g<rest>", new_line
                     )
+                    changed = True
+                # Label rewrites on links now targeting the new slug.
+                if display_renames and "[[kinds/" + new_slug in new_line:
+                    new_line = _rewrite_labels_inline(
+                        new_line, labeled_kind_link_re, display_renames
+                    )
+                    if new_line != line:
+                        changed = True
+                if changed and new_line != line:
                     refs.append(MoveRef(md_file, i, line, new_line))
+
+        # Frontmatter edits on the renamed kind's own _kind.md.
+        if display_renames:
+            kind_md = old_dir / "_kind.md"
+            if kind_md.is_file():
+                fm_refs = _frontmatter_field_edits(
+                    kind_md,
+                    {"singular": new_display_names.get("singular", old_singular),
+                     "plural": new_display_names.get("plural", old_plural)},
+                    current={"singular": old_singular, "plural": old_plural},
+                )
+                refs.extend(fm_refs)
 
     else:
         old_id = str(old_dir.relative_to(content))
         new_id = str(new_dir.relative_to(content))
-        refs, warnings = _scan_entity_refs(project, old_id, new_id)
 
-    if not is_kind:
-        return RenamePlan(
-            old_id=old_id,
-            new_id=new_id,
-            old_dir=old_dir,
-            new_dir=new_dir,
-            is_kind=is_kind,
-            refs=refs,
-            warnings=warnings,
+        # ------------------------------------------------------------------
+        # Compute display-name rename and pass through to the entity
+        # scanner so it can rewrite labels alongside paths.
+        # ------------------------------------------------------------------
+        old_name = read_entity_display_name(old_dir)
+        if new_display_names:
+            new_name = new_display_names.get("name", old_name)
+            if old_name and new_name and old_name != new_name:
+                display_renames[old_name] = new_name
+
+        refs, warnings = _scan_entity_refs(
+            project, old_id, new_id, display_renames=display_renames,
         )
+
+        # Frontmatter edit on the renamed entity's own index.md.
+        if display_renames:
+            md = old_dir / "index.md"
+            if md.is_file():
+                fm_refs = _frontmatter_field_edits(
+                    md,
+                    {"name": new_display_names.get("name", old_name)},
+                    current={"name": old_name},
+                )
+                refs.extend(fm_refs)
+
     return RenamePlan(
         old_id=old_id,
         new_id=new_id,
@@ -1354,6 +1559,8 @@ def plan_rename(project: Path, old_path: str, new_slug: str) -> RenamePlan:
         new_dir=new_dir,
         is_kind=is_kind,
         refs=refs,
+        warnings=warnings,
+        display_renames=display_renames,
     )
 
 
