@@ -355,11 +355,34 @@ def cluster_of(entity_id: str, index: WikilinkIndex) -> str | None:
     A page outside of content/ (e.g. a kind page) has no cluster — pass
     ``cluster=None`` explicitly to the resolver in that case rather than
     calling this.
+
+    For resolver/preferred-form scoping use :func:`scope_of` instead,
+    which also treats universal substrates as their own scope.
     """
     if not entity_id:
         return None
     head = entity_id.split("/", 1)[0]
     if head in index.cluster_ids:
+        return head
+    return None
+
+
+def scope_of(entity_id: str, index: WikilinkIndex) -> str | None:
+    """Return the resolution scope for *entity_id*.
+
+    The scope is the top-level folder when it is either a cluster id
+    or a universal substrate id — both behave the same way for the
+    purposes of bare-slug resolution and preferred-form selection
+    (a page resolves bare slugs against entities sharing its scope
+    first, falling back to universal substrates).
+
+    Returns None for entities whose top-level folder is neither a
+    cluster nor a universal substrate (e.g. kind pages).
+    """
+    if not entity_id:
+        return None
+    head = entity_id.split("/", 1)[0]
+    if head in index.cluster_ids or head in index.universal_ids:
         return head
     return None
 

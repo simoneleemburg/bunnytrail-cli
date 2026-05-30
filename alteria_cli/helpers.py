@@ -257,11 +257,11 @@ def _scan_entity_refs(
     # Local import to avoid a circular import at module load.
     from .wikilinks import (
         build_index,
-        cluster_of,
         iter_wikilinks,
         preferred_form,
         render_wikilink,
         resolve,
+        scope_of,
     )
 
     content = content_root(project).resolve()
@@ -280,7 +280,7 @@ def _scan_entity_refs(
 
     for md_file in iter_entity_md_files(content):
         page_id = str(md_file.parent.relative_to(content))
-        page_cluster = cluster_of(page_id, index)
+        page_cluster = scope_of(page_id, index)
         # Frontmatter region is needed so we don't try to resolve
         # wikilinks inside structured YAML.
         text = md_file.read_text(encoding="utf-8")
@@ -854,9 +854,9 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
     # Build a wikilink index and figure out the article's cluster so
     # we can emit short forms when they resolve unambiguously.
     # ------------------------------------------------------------------
-    from .wikilinks import build_index, cluster_of, preferred_form
+    from .wikilinks import build_index, preferred_form, scope_of
     index = build_index(project)
-    article_cluster = cluster_of(article_id_norm, index)
+    article_cluster = scope_of(article_id_norm, index)
 
     # ------------------------------------------------------------------
     # Compile patterns (whole-word, case-sensitive)
@@ -1334,11 +1334,11 @@ def _scan_collection_refs(
     from .wikilinks import (
         WIKILINK_RE,
         build_index,
-        cluster_of,
         parse_wikilink,
         preferred_form,
         render_wikilink,
         resolve,
+        scope_of,
     )
 
     content = content_root(project).resolve()
@@ -1371,7 +1371,7 @@ def _scan_collection_refs(
 
     for md_file in iter_entity_md_files(content):
         page_id = str(md_file.parent.relative_to(content))
-        page_cluster = cluster_of(page_id, index)
+        page_cluster = scope_of(page_id, index)
         text = md_file.read_text(encoding="utf-8")
         fm, _body = split_frontmatter(text)
         fm_line_count = 0

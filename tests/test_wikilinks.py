@@ -291,6 +291,26 @@ def test_preferred_form_no_cluster_page_uses_full_path(project: Path) -> None:
     assert preferred_form("aurethia/places/sharazan", None, idx) == "aurethia/places/sharazan"
 
 
+def test_preferred_form_universal_to_universal_uses_bare(project: Path) -> None:
+    idx = build_index(project)
+    # Rendering page IS a universal-substrate page. Linking to another
+    # entity in the same substrate should pick the shortest unambiguous
+    # in-substrate form (typically the bare slug).
+    assert preferred_form(
+        "foundation/concepts/harmonia", "foundation", idx
+    ) == "harmonia"
+
+
+def test_scope_of_returns_cluster_and_universal(project: Path) -> None:
+    from alteria_cli.wikilinks import scope_of
+    idx = build_index(project)
+    assert scope_of("aurethia/places/sharazan", idx) == "aurethia"
+    assert scope_of("earth/places/shanghai", idx) == "earth"
+    # Universal substrate is its own scope (unlike cluster_of, which
+    # returns None here).
+    assert scope_of("foundation/concepts/harmonia", idx) == "foundation"
+
+
 # ---------------------------------------------------------------------------
 # render_wikilink
 # ---------------------------------------------------------------------------
