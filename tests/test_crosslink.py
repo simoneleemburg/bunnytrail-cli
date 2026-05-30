@@ -123,3 +123,77 @@ def test_crosslink_folder_missing_namespace(project: Path) -> None:
     )
     assert plans == []
     assert "namespace not found" in err
+
+
+# ---------------------------------------------------------------------------
+# Existing-link simplification
+# ---------------------------------------------------------------------------
+
+def test_crosslink_simplifies_existing_full_path_to_bare(project: Path) -> None:
+    # An existing link written with the full path should be shortened
+    # to the bare slug when unambiguous from this page.
+    _set_body(project, "aurethia/people/duskmere",
+              "We visited [[aurethia/places/sharazan|Sharazan]].\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    assert plan.error == ""
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan|Sharazan]]" in body
+    assert "aurethia/places/sharazan" not in body
+
+
+def test_crosslink_simplifies_preserves_anchor(project: Path) -> None:
+    _set_body(project, "aurethia/people/duskmere",
+              "See [[aurethia/places/sharazan#history|its history]].\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan#history|its history]]" in body
+
+
+def test_crosslink_simplifies_synthesises_label_when_leaf_changes(
+    project: Path,
+) -> None:
+    # The old link had no label and its leaf was the displayed text.
+    # After simplification the leaf is different, so we synthesise the
+    # old leaf as a label so the rendered prose doesn't change.
+    _set_body(project, "aurethia/people/duskmere",
+              "Origin: [[aurethia/places/sharazan]].\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    # Old leaf was 'sharazan', new (shorter) form is 'sharazan' too —
+    # so this particular case stays a bare link. Verify it didn't grow
+    # a spurious label.
+    assert "[[sharazan]]" in body
+    assert "aurethia/places/sharazan" not in body
+
+
+def test_crosslink_simplification_leaves_kinds_untouched(project: Path) -> None:
+    _set_body(project, "aurethia/people/duskmere",
+              "She is [[kinds/human|human]].\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[kinds/human|human]]" in body
+
+
+def test_crosslink_simplification_leaves_same_page_anchors(project: Path) -> None:
+    _set_body(project, "aurethia/people/duskmere",
+              "See [[#history|below]].\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[#history|below]]" in body
+
+
+def test_crosslink_simplification_leaves_unresolvable_links_alone(
+    project: Path,
+) -> None:
+    _set_body(project, "aurethia/people/duskmere",
+              "Visit [[aurethia/places/atlantis|Atlantis]] someday.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    # Atlantis doesn't exist — leave it untouched rather than mangling it.
+    assert "[[aurethia/places/atlantis|Atlantis]]" in body

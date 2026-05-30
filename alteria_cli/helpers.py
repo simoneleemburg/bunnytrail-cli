@@ -777,6 +777,63 @@ def _is_in_span(pos: int, length: int, spans: list[tuple[int, int]]) -> bool:
     return any(s < end and e > pos for s, e in spans)
 
 
+def _simplify_wikilinks_on_line(
+    line: str,
+    *,
+    article_cluster: "str | None",
+    index,
+    parse_wikilink,
+    preferred_form,
+    render_wikilink,
+    wikilink_re,
+) -> str:
+    """Rewrite every ``[[…]]`` on *line* to its :func:`preferred_form`.
+
+    Only ``"path"``-kind links are rewritten — kinds, lang tags,
+    same-page anchors, and collection directives are passed through
+    unchanged. Anchors and labels are preserved. If the link doesn't
+    resolve cleanly to a known entity (missing / ambiguous / literal)
+    the original token is kept verbatim.
+
+    Returns the (possibly modified) line.
+    """
+    def _replace(m):
+        token = m.group(0)
+        inner = m.group("inner")
+        parsed = parse_wikilink(inner)
+        if parsed.kind != "path":
+            return token
+        if parsed.path not in index.entity_ids:
+            # Try a suffix resolve to get the canonical id; if that fails
+            # or is ambiguous, leave the token alone.
+            from .wikilinks import resolve  # local import to avoid cycle
+            res = resolve(parsed, article_cluster, index)
+            if res.status != "resolved" or not res.entity_id:
+                return token
+            target_id = res.entity_id
+        else:
+            target_id = parsed.path
+
+        short = preferred_form(target_id, article_cluster, index)
+        if short == parsed.path:
+            return token  # already shortest
+
+        # Preserve a non-empty label as-is. When the original had no
+        # label and the short form's leaf no longer matches the
+        # display the reader would have seen (the leaf of the old
+        # path), synthesise a label from the old leaf so the rendered
+        # text doesn't change.
+        label = parsed.label
+        if not label:
+            old_leaf = parsed.path.split("/")[-1]
+            new_leaf = short.split("/")[-1]
+            if new_leaf != old_leaf:
+                label = old_leaf
+        return render_wikilink(short, anchor=parsed.anchor, label=label)
+
+    return wikilink_re.sub(_replace, line)
+
+
 def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> CrosslinkPlan:
     """Build a CrosslinkPlan for inserting wikilinks into *article_path*.
 
@@ -854,7 +911,15 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
     # Build a wikilink index and figure out the article's cluster so
     # we can emit short forms when they resolve unambiguously.
     # ------------------------------------------------------------------
-    from .wikilinks import build_index, preferred_form, scope_of
+    from .wikilinks import (
+        WIKILINK_RE,
+        build_index,
+        parse_wikilink,
+        preferred_form,
+        render_wikilink,
+        resolve,
+        scope_of,
+    )
     index = build_index(project)
     article_cluster = scope_of(article_id_norm, index)
 
@@ -900,6 +965,26 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
             continue
         new_line = line
 
+        # ----------------------------------------------------------------
+        # Pass 1: simplify existing wikilinks to their preferred_form.
+        # Rewrites e.g. [[foundation/fabric/primitives/mundus|Mundus]]
+        # to [[mundus|Mundus]] when bare is unambiguous from this page.
+        # Kind links, lang tags, same-page anchors, and collection
+        # directives are left alone. Anchors and labels are preserved.
+        # ----------------------------------------------------------------
+        new_line = _simplify_wikilinks_on_line(
+            new_line,
+            article_cluster=article_cluster,
+            index=index,
+            parse_wikilink=parse_wikilink,
+            preferred_form=preferred_form,
+            render_wikilink=render_wikilink,
+            wikilink_re=WIKILINK_RE,
+        )
+
+        # ----------------------------------------------------------------
+        # Pass 2: insert new wikilinks for unlinked mentions.
+        # ----------------------------------------------------------------
         for pat, match_text, target, is_kind_target in patterns:
             if match_text in linked_texts:
                 continue
