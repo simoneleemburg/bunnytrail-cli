@@ -227,6 +227,38 @@ class MovePlan:
     refs: list[MoveRef] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)  # non-fatal scanner findings
     error: str = ""                 # non-empty means the plan is invalid
+    collisions: list[str] = field(default_factory=list)
+    # Existing entity ids that share the new id's leaf slug.  Non-empty
+    # means the move/rename will make bare-slug links to those peers
+    # ambiguous; the scanner will rewrite those links to a longer form,
+    # but the user should be warned and confirm.
+
+
+def _detect_collisions(
+    new_id: str,
+    pre_index,           # WikilinkIndex before the move/rename
+    *,
+    exclude: "str | None" = None,
+) -> "list[str]":
+    """Return the list of existing entity ids whose **leaf slug** matches
+    *new_id*'s leaf slug.
+
+    These are the peers that will become ambiguous once *new_id* enters
+    the index: a bare ``[[<leaf>]]`` link previously resolved to one of
+    them, and after the move it will resolve to multiple candidates.
+
+    *exclude* is normally the moving entity's old id (so we don't list
+    the moving entity itself when its slug isn't changing).
+    """
+    leaf = new_id.rsplit("/", 1)[-1]
+    peers: list[str] = []
+    for eid in pre_index.entity_ids:
+        if eid == new_id or eid == exclude:
+            continue
+        if eid.rsplit("/", 1)[-1] == leaf:
+            peers.append(eid)
+    peers.sort()
+    return peers
 
 
 def _scan_entity_refs(
@@ -235,6 +267,7 @@ def _scan_entity_refs(
     new_id: str,
     *,
     display_renames: "dict[str, str] | None" = None,
+    collision_peers: "list[str] | None" = None,
 ) -> tuple[list[MoveRef], list[str]]:
     """Find every reference to *old_id* across the project and produce
     rewrite operations targeting *new_id*.
@@ -317,6 +350,7 @@ def _scan_entity_refs(
                 old_id=old_id,
                 new_id=new_id,
                 display_renames=display_renames or {},
+                collision_peers=set(collision_peers or ()),
             )
             warnings.extend(warns)
             if rewrote:
@@ -350,8 +384,11 @@ def _rewrite_wikilinks_on_line(
     old_id: str,
     new_id: str,
     display_renames: "dict[str, str] | None" = None,
+    collision_peers: "set[str] | None" = None,
 ) -> tuple[str, bool, list[str]]:
-    """Rewrite every ``[[…]]`` on *line* whose resolved target is *old_id*.
+    """Rewrite every ``[[…]]`` on *line* whose resolved target is *old_id*
+    (or a *collision_peer* whose preferred form has shifted because of
+    the move).
 
     Returns ``(new_line, rewrote_anything, warnings)``. The
     replacement form is selected by
@@ -365,6 +402,14 @@ def _rewrite_wikilinks_on_line(
     is bare (no explicit label) and *display_renames* maps the old
     leaf to a new display value, an explicit label is added so the
     rendered text matches the renamed entity's chosen display name.
+
+    *collision_peers* names existing entities whose **leaf slug** now
+    clashes with *new_id*'s leaf slug after the move.  Any link that
+    used to resolve unambiguously to a peer via a bare or short form
+    will, post-move, resolve ambiguously — so those links are
+    rewritten to the new :func:`preferred_form` for the peer (typically
+    a longer suffix or the full id).  Peer-rewrites preserve the
+    original anchor and label exactly.
     """
     from .wikilinks import (
         WIKILINK_RE,
@@ -438,6 +483,31 @@ def _rewrite_wikilinks_on_line(
             pieces.append(replacement)
             cursor = m.end()
             rewrote = True
+        elif (
+            collision_peers
+            and res.status == "resolved"
+            and res.entity_id in collision_peers
+        ):
+            # Pre-move: this link unambiguously resolved to a peer.
+            # Post-move: the peer shares a leaf slug with the moved
+            # entity, so the bare/short form is no longer unique.
+            # Rewrite to the peer's new preferred form.
+            peer_path = preferred_form(res.entity_id, page_cluster, post_index)
+            # Always preserve the original label (we are not renaming
+            # the peer's display name — only re-routing the link).
+            if parsed.kind == "collection":
+                replacement = f"[[collection:{peer_path}]]"
+            else:
+                replacement = render_wikilink(
+                    peer_path, parsed.anchor, parsed.label
+                )
+            # Skip no-op (link was already in a disambiguated form).
+            if replacement == m.group(0):
+                continue
+            pieces.append(line[cursor:m.start()])
+            pieces.append(replacement)
+            cursor = m.end()
+            rewrote = True
         elif res.status == "ambiguous" and old_id in res.candidates:
             warnings.append(
                 f"{page_id}: [[{inner}]] is already ambiguous "
@@ -506,7 +576,15 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
             error=f"destination already exists: content/{new_id}",
         )
 
-    refs, warnings = _scan_entity_refs(project, old_id, new_id)
+    # Detect leaf-slug collisions in the post-move world so the user
+    # can be warned, and so existing links to peers can be rewritten.
+    from .wikilinks import build_index
+    pre_index = build_index(project)
+    collisions = _detect_collisions(new_id, pre_index, exclude=old_id)
+
+    refs, warnings = _scan_entity_refs(
+        project, old_id, new_id, collision_peers=collisions or None,
+    )
 
     return MovePlan(
         old_id=old_id,
@@ -515,6 +593,7 @@ def plan_move(project: Path, entity_path: str, new_parent: str) -> MovePlan:
         new_dir=new_dir,
         refs=refs,
         warnings=warnings,
+        collisions=collisions,
     )
 
 
@@ -1324,6 +1403,9 @@ class RenamePlan:
     # entry keyed by the old `name:` value; for kinds it has up to two
     # entries (old singular -> new singular, old plural -> new plural).
     # Empty when the caller didn't ask for display-name changes.
+    collisions: list[str] = field(default_factory=list)
+    # Existing entity ids that share the new id's leaf slug — see
+    # :class:`MovePlan` for the full contract.
 
 
 def read_entity_display_name(entity_dir: Path) -> str:
@@ -1438,6 +1520,7 @@ def plan_rename(
     refs: list[MoveRef] = []
     display_renames: dict[str, str] = {}
     warnings: list[str] = []
+    collisions: list[str] = []
 
     if is_kind:
         old_id = str(old_dir.relative_to(kinds))
@@ -1537,8 +1620,16 @@ def plan_rename(
             if old_name and new_name and old_name != new_name:
                 display_renames[old_name] = new_name
 
+        # Detect leaf-slug collisions so the user can be warned and so
+        # existing links to peers are rewritten in the same pass.
+        from .wikilinks import build_index as _build_index
+        pre_index = _build_index(project)
+        collisions = _detect_collisions(new_id, pre_index, exclude=old_id)
+
         refs, warnings = _scan_entity_refs(
-            project, old_id, new_id, display_renames=display_renames,
+            project, old_id, new_id,
+            display_renames=display_renames,
+            collision_peers=collisions or None,
         )
 
         # Frontmatter edit on the renamed entity's own index.md.
@@ -1561,6 +1652,7 @@ def plan_rename(
         refs=refs,
         warnings=warnings,
         display_renames=display_renames,
+        collisions=collisions,
     )
 
 

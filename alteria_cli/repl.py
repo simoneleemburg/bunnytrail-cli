@@ -555,6 +555,8 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session:
         for w in plan.warnings:
             print(f"    ! {w}")
 
+    _print_collisions(plan)
+
     confirm = _ask(session, "\n  Proceed? [y/N]")
     if not confirm or confirm.lower() not in ("y", "yes"):
         print("  Cancelled.")
@@ -683,6 +685,8 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
         for w in plan.warnings:
             print(f"    ! {w}")
 
+    _print_collisions(plan)
+
     confirm = _ask(session, "\n  Proceed? [y/N]")
     if not confirm or confirm.lower() not in ("y", "yes"):
         print("  Cancelled.")
@@ -771,6 +775,28 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
 
     print(f"  Done.  Updated {len(actionable)} article(s).")
     _print_crosslink_warnings(actionable)
+
+
+def _print_collisions(plan) -> None:
+    """Print a 'name clash' warning for a move/rename plan in the REPL.
+
+    Mirrors :func:`alteria_cli.main._print_collisions` but uses the
+    REPL's two-space indent and plain ``print``.
+    """
+    peers = getattr(plan, "collisions", None) or []
+    if not peers:
+        return
+    n = len(peers)
+    print(
+        f"\n  Name clash: the new leaf slug is already used by "
+        f"{n} existing entit{'y' if n == 1 else 'ies'}:"
+    )
+    for peer in peers:
+        print(f"    ! content/{peer}")
+    print(
+        "    Existing bare links to those entities will be rewritten "
+        "to a longer disambiguating form."
+    )
 
 
 def _print_crosslink_warnings(plans) -> None:

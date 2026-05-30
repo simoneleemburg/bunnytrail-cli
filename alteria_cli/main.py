@@ -283,6 +283,30 @@ def add_kind(
 # rename
 # ---------------------------------------------------------------------------
 
+def _print_collisions(plan) -> None:
+    """Print a 'name clash' warning for a move/rename plan.
+
+    Called from both :func:`rename` and :func:`move` once the plan has
+    been built.  ``plan.collisions`` is a (possibly empty) list of
+    existing entity ids that share the new leaf slug; emitting them
+    here lets the user decide whether to abort.  Existing links to
+    those peers will be rewritten by the same scanner pass.
+    """
+    if not plan.collisions:
+        return
+    n = len(plan.collisions)
+    click.echo(
+        f"\nName clash: the new leaf slug is already used by "
+        f"{n} existing entit{'y' if n == 1 else 'ies'}:"
+    )
+    for peer in plan.collisions:
+        click.echo(f"  ! content/{peer}")
+    click.echo(
+        "  Existing bare links to those entities will be rewritten "
+        "to a longer disambiguating form."
+    )
+
+
 @cli.command()
 @click.argument("old_path")
 @click.argument("new_slug")
@@ -393,6 +417,8 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
         for w in plan.warnings:
             click.echo(f"  ! {w}")
 
+    _print_collisions(plan)
+
     if dry_run:
         click.echo("\n(dry run — no files changed)")
         return
@@ -475,6 +501,8 @@ def move(ctx: click.Context, entity_path: str, new_parent: str, is_kind: bool, d
         click.echo(f"\nWarnings ({len(plan.warnings)}):")
         for w in plan.warnings:
             click.echo(f"  ! {w}")
+
+    _print_collisions(plan)
 
     if dry_run:
         click.echo("\n(dry run — no files changed)")
