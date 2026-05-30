@@ -31,6 +31,7 @@ from .helpers import (
     execute_move,
     execute_rename,
     find_project_root,
+    format_diff_pair,
     iter_entity_md_files,
     iter_kind_md_files,
     kinds_root,
@@ -41,6 +42,7 @@ from .helpers import (
     plan_move,
     plan_move_kind,
     plan_rename,
+    use_color,
     write_frontmatter_md,
 )
 
@@ -407,8 +409,12 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
         for ref in plan.refs:
             rel = ref.file.relative_to(root)
             click.echo(f"  {rel}:{ref.line_no}")
-            click.echo(f"    - {ref.old_text.strip()}")
-            click.echo(f"    + {ref.new_text.strip()}")
+            old_line, new_line = format_diff_pair(
+                ref.old_text, ref.new_text,
+                indent="    ", color=use_color(),
+            )
+            click.echo(old_line)
+            click.echo(new_line)
     else:
         click.echo("\nNo references found — only the folder will be renamed.")
 
@@ -489,8 +495,12 @@ def move(ctx: click.Context, entity_path: str, new_parent: str, is_kind: bool, d
         for ref in plan.refs:
             rel = ref.file.relative_to(root)
             click.echo(f"  {rel}:{ref.line_no}")
-            click.echo(f"    - {ref.old_text.strip()}")
-            click.echo(f"    + {ref.new_text.strip()}")
+            old_line, new_line = format_diff_pair(
+                ref.old_text, ref.new_text,
+                indent="    ", color=use_color(),
+            )
+            click.echo(old_line)
+            click.echo(new_line)
     else:
         if is_kind:
             click.echo("\nNo reference rewrites needed (kinds are referenced by slug).")
@@ -597,8 +607,12 @@ def crosslink(
         click.echo(f"\n  content/{p.article_id}/index.md")
         for edit in p.edits:
             click.echo(f"    line {edit.line_no}:")
-            click.echo(f"      - {edit.old_text.strip()}")
-            click.echo(f"      + {edit.new_text.strip()}")
+            old_line, new_line = format_diff_pair(
+                edit.old_text, edit.new_text,
+                indent="      ", color=use_color(),
+            )
+            click.echo(old_line)
+            click.echo(new_line)
 
     if dry_run:
         click.echo("\n(dry run — no files changed)")

@@ -1985,3 +1985,154 @@ def _collection_title_ref(
             return MoveRef(collection_md, i, line, new_line)
         return None  # title exists but doesn't match — leave it alone
     return None
+
+
+# ---------------------------------------------------------------------------
+# Diff rendering — shared by the CLI and the REPL
+# ---------------------------------------------------------------------------
+#
+# All three preview surfaces (rename, move, crosslink) print a two-line
+# block per edit::
+#
+#     <indent>- <old text>
+#     <indent>+ <new text>
+#
+# These helpers colour those blocks so the reader can scan a long
+# crosslink/rename diff quickly:
+#
+#   * The whole '-' line is red and the whole '+' line is green
+#     (familiar from git/unified diff).
+#   * Wikilinks (``[[…]]``) that differ positionally between old and new
+#     are rendered bold + bright; identical wikilinks fall back to the
+#     line's base colour.  Prose between wikilinks is rendered in the
+#     line's base colour too.
+#
+# Honours the de-facto-standard ``NO_COLOR`` env var and auto-disables
+# colour when stdout is not a TTY (so piped output stays plain).
+
+
+_ANSI_RESET = "\x1b[0m"
+_ANSI_RED = "\x1b[31m"
+_ANSI_GREEN = "\x1b[32m"
+_ANSI_BOLD_RED = "\x1b[1;91m"
+_ANSI_BOLD_GREEN = "\x1b[1;92m"
+
+
+def use_color(stream=None) -> bool:
+    """Return ``True`` when ANSI colour codes are appropriate.
+
+    Honours ``NO_COLOR`` (any value disables) and falls back to
+    :py:meth:`io.IOBase.isatty` on *stream* (defaulting to stdout) so
+    that piped or redirected output stays plain.
+    """
+    import os
+    import sys
+    if os.environ.get("NO_COLOR"):
+        return False
+    if stream is None:
+        stream = sys.stdout
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def _split_wikilinks(text: str) -> list[tuple[str, bool]]:
+    """Split *text* into ``(segment, is_wikilink)`` chunks in order.
+
+    Used by :func:`format_diff_pair` to align the wikilinks in the old
+    and new lines so we can highlight just the ones that actually
+    changed.  Prose runs in between are kept as separate chunks so the
+    output preserves the original spacing exactly.
+    """
+    from .wikilinks import WIKILINK_RE
+    chunks: list[tuple[str, bool]] = []
+    cursor = 0
+    for m in WIKILINK_RE.finditer(text):
+        if m.start() > cursor:
+            chunks.append((text[cursor:m.start()], False))
+        chunks.append((m.group(0), True))
+        cursor = m.end()
+    if cursor < len(text):
+        chunks.append((text[cursor:], False))
+    return chunks
+
+
+def format_diff_pair(
+    old: str,
+    new: str,
+    *,
+    indent: str = "  ",
+    color: bool = True,
+) -> tuple[str, str]:
+    """Render an ``(old, new)`` edit as two ready-to-print lines.
+
+    Each returned string starts with *indent* followed by ``- `` or
+    ``+ `` and the (already-stripped) text.  When *color* is ``True``
+    the entire old line is red and the new line green; wikilinks that
+    appear in only one side or whose i-th occurrence differs between
+    the two sides are bold-brightened so the changed segments stand
+    out.
+
+    When *color* is ``False`` the strings are plain ASCII — identical
+    to what the previous unformatted ``f"  - {…}"`` calls produced.
+    """
+    old_text = old.strip()
+    new_text = new.strip()
+
+    if not color:
+        return (f"{indent}- {old_text}", f"{indent}+ {new_text}")
+
+    old_chunks = _split_wikilinks(old_text)
+    new_chunks = _split_wikilinks(new_text)
+
+    # Pair up wikilinks positionally: the n-th wikilink in old vs the
+    # n-th in new.  Any wikilink that appears only on one side, or
+    # whose text differs from its paired counterpart, is marked
+    # "changed" and rendered in the bold/bright variant.
+    old_wl_idx = [i for i, (_, is_wl) in enumerate(old_chunks) if is_wl]
+    new_wl_idx = [i for i, (_, is_wl) in enumerate(new_chunks) if is_wl]
+
+    old_changed: set[int] = set()
+    new_changed: set[int] = set()
+    pairs = max(len(old_wl_idx), len(new_wl_idx))
+    for n in range(pairs):
+        o = old_wl_idx[n] if n < len(old_wl_idx) else None
+        p = new_wl_idx[n] if n < len(new_wl_idx) else None
+        if o is None:
+            new_changed.add(p)  # type: ignore[arg-type]
+        elif p is None:
+            old_changed.add(o)
+        elif old_chunks[o][0] != new_chunks[p][0]:
+            old_changed.add(o)
+            new_changed.add(p)
+
+    def _render(
+        chunks: list[tuple[str, bool]],
+        changed: set[int],
+        base: str,
+        bold: str,
+    ) -> str:
+        parts: list[str] = [base]
+        for i, (seg, is_wl) in enumerate(chunks):
+            if is_wl and i in changed:
+                # Switch to bold/bright, then back to the line's base
+                # colour so trailing prose stays the right hue.
+                parts.append(bold)
+                parts.append(seg)
+                parts.append(_ANSI_RESET)
+                parts.append(base)
+            else:
+                parts.append(seg)
+        parts.append(_ANSI_RESET)
+        return "".join(parts)
+
+    old_line = (
+        f"{indent}{_ANSI_RED}- {_ANSI_RESET}"
+        + _render(old_chunks, old_changed, _ANSI_RED, _ANSI_BOLD_RED)
+    )
+    new_line = (
+        f"{indent}{_ANSI_GREEN}+ {_ANSI_RESET}"
+        + _render(new_chunks, new_changed, _ANSI_GREEN, _ANSI_BOLD_GREEN)
+    )
+    return (old_line, new_line)

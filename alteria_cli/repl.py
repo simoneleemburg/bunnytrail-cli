@@ -23,6 +23,7 @@ from .helpers import (
     execute_crosslink,
     execute_move,
     execute_rename,
+    format_diff_pair,
     is_entity_folder,
     iter_entity_md_files,
     iter_kind_md_files,
@@ -34,6 +35,7 @@ from .helpers import (
     plan_move,
     plan_move_kind,
     plan_rename,
+    use_color,
     write_frontmatter_md,
 )
 
@@ -542,8 +544,12 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session:
         for ref in plan.refs:
             rel = ref.file.relative_to(project)
             print(f"    {rel}:{ref.line_no}")
-            print(f"      - {ref.old_text.strip()}")
-            print(f"      + {ref.new_text.strip()}")
+            old_line, new_line = format_diff_pair(
+                ref.old_text, ref.new_text,
+                indent="      ", color=use_color(),
+            )
+            print(old_line)
+            print(new_line)
     else:
         if is_kind:
             print("  No reference rewrites needed (kinds are referenced by slug).")
@@ -675,8 +681,12 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
         for ref in plan.refs:
             rel = ref.file.relative_to(project)
             print(f"    {rel}:{ref.line_no}")
-            print(f"      - {ref.old_text.strip()}")
-            print(f"      + {ref.new_text.strip()}")
+            old_line, new_line = format_diff_pair(
+                ref.old_text, ref.new_text,
+                indent="      ", color=use_color(),
+            )
+            print(old_line)
+            print(new_line)
     else:
         print("  No references found — only the folder will be renamed.")
 
@@ -758,8 +768,12 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
         print(f"\n    content/{p.article_id}/index.md")
         for edit in p.edits:
             print(f"      line {edit.line_no}:")
-            print(f"        - {edit.old_text.strip()}")
-            print(f"        + {edit.new_text.strip()}")
+            old_line, new_line = format_diff_pair(
+                edit.old_text, edit.new_text,
+                indent="        ", color=use_color(),
+            )
+            print(old_line)
+            print(new_line)
 
     confirm = _ask(session, "\n  Proceed? [y/N]")
     if not confirm or confirm.lower() not in ("y", "yes"):
