@@ -292,3 +292,94 @@ def test_crosslink_config_loader_parses_lists(project: Path) -> None:
     cfg = load_crosslink_config(project)
     assert cfg.never == {"Role", "Process", "Object"}
     assert cfg.warn == {"Trait", "Event"}
+
+
+# ---------------------------------------------------------------------------
+# Proper Noun Phrase protection
+# ---------------------------------------------------------------------------
+#
+# Rule: if a candidate match is a strict fragment of a larger Proper
+# Noun Phrase (a run of Capitalized words, optionally joined by
+# lowercase connectors like 'of'/'the'), and the WHOLE phrase isn't
+# itself a linkable term, skip linking the fragment.
+
+
+def test_pnp_skips_linking_prefix_of_larger_phrase(project: Path) -> None:
+    # 'Sharazan' is a linkable entity (aurethia/places/sharazan).
+    # 'Sharazan Tower' is not.  The phrase 'Sharazan Tower' should
+    # NOT get 'Sharazan' linked — the writer means a specific compound
+    # name.
+    _set_body(project, "aurethia/people/duskmere",
+              "He climbed the Sharazan Tower at dawn.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan" not in body, body
+    assert "Sharazan Tower" in body
+
+
+def test_pnp_with_connectors_skips_fragment(project: Path) -> None:
+    # 'Order of the Sharazan' — same rule, with lowercase connectors
+    # 'of' and 'the' inside the phrase.
+    _set_body(project, "aurethia/people/duskmere",
+              "The Order of the Sharazan met at dusk.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan" not in body, body
+
+
+def test_pnp_does_not_block_standalone_match(project: Path) -> None:
+    # A bare 'Sharazan' in normal prose IS linked — it's a 1-word PNP
+    # and the candidate matches the whole phrase.
+    _set_body(project, "aurethia/people/duskmere",
+              "She visited Sharazan last summer.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan|Sharazan]]" in body
+
+
+def test_pnp_does_not_block_lowercase_followup(project: Path) -> None:
+    # 'Sharazan tower' (lowercase 't') is NOT a PNP — the run ends at
+    # 'Sharazan'.  The bare 'Sharazan' should still link.
+    _set_body(project, "aurethia/people/duskmere",
+              "He climbed the Sharazan tower at dawn.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan|Sharazan]]" in body
+
+
+def test_pnp_punctuation_breaks_the_phrase(project: Path) -> None:
+    # 'Sharazan, Tower of Light' — the comma after Sharazan ends the
+    # PNP run, so 'Sharazan' is its own 1-word PNP and gets linked.
+    _set_body(project, "aurethia/people/duskmere",
+              "Sharazan, Tower of Light, gleamed.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan|Sharazan]]" in body
+
+
+def test_pnp_links_whole_phrase_when_it_is_a_candidate(project: Path) -> None:
+    # Build a second entity whose display name is the whole phrase
+    # 'Sharazan Tower'.  The matcher should link the WHOLE phrase
+    # (long-first sort), and skip the bare 'Sharazan' inside it.
+    tower = project / "content" / "aurethia" / "places" / "sharazan-tower"
+    tower.mkdir(parents=True)
+    (tower / "index.md").write_text(
+        "---\nname: Sharazan Tower\nkind: place\n---\nA tower.\n",
+        encoding="utf-8",
+    )
+    _set_body(project, "aurethia/people/duskmere",
+              "He climbed the Sharazan Tower at dawn.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    # The whole phrase is linked; the bare 'Sharazan' was never a
+    # separate match (its position is inside the new wikilink span).
+    assert "[[sharazan-tower|Sharazan Tower]]" in body
+    # Make sure we did NOT also wrap 'Sharazan' as a nested/adjacent
+    # link.
+    assert body.count("[[sharazan") == 1, body

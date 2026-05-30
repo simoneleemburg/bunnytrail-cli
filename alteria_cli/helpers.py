@@ -955,6 +955,120 @@ def _is_in_span(pos: int, length: int, spans: list[tuple[int, int]]) -> bool:
     return any(s < end and e > pos for s, e in spans)
 
 
+# Lowercase connector words allowed inside a Proper Noun Phrase.
+# These are stop-words that conventionally stay lowercase in titles and
+# names but don't break the PNP — e.g. "Order of the Bellonas" is one
+# phrase, not three.  Restricted to whole-token matches; a PNP must
+# still START and END with a Capitalized word.
+_PNP_CONNECTORS = frozenset({
+    "of", "the", "and",                # English
+    "de", "da", "du",                  # Romance particles
+    "von", "van",                      # Germanic
+    "le", "la",                        # French articles
+    "el", "al",                        # Spanish / Arabic article
+    "bin", "ibn",                      # Arabic patronymics
+})
+
+# A word token: a maximal run of word characters (letters/digits/_) with
+# optional internal apostrophes or hyphens (so "Bellonas", "K'tharr",
+# and "Foo-Bar" are each a single token).  Matches positionally so the
+# scanner can rebuild span info.
+_PNP_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:['\-][A-Za-z0-9]+)*")
+
+
+def _is_capitalized(token: str) -> bool:
+    """A token counts as Capitalized when its first letter is uppercase.
+
+    The rest of the token is unconstrained so that acronyms (``USA``),
+    mixed-case proper nouns (``McKay``), and apostrophe/hyphen forms
+    (``O'Brien``, ``Foo-Bar``) all qualify.  Pure-lowercase tokens are
+    not Capitalized, and digit-led tokens are excluded by the token
+    regex itself.
+    """
+    return bool(token) and token[0].isupper()
+
+
+def _proper_noun_phrase_spans(line: str) -> list[tuple[int, int, str]]:
+    """Return ``(start, end, phrase_text)`` for every Proper Noun Phrase
+    on *line*.
+
+    A PNP is a maximal run of word tokens where:
+
+      * the first and last tokens are :func:`_is_capitalized`, AND
+      * any interior tokens are either Capitalized or in
+        :data:`_PNP_CONNECTORS`.
+
+    Tokens are separated by single spaces.  The run ends as soon as
+    the next adjacent token (no intervening non-space characters)
+    fails to qualify; punctuation, line breaks, or any non-space
+    character between tokens also ends the run.
+
+    Single-word PNPs (length 1) are included so the existing matcher
+    behaviour for one-word terms is unchanged.
+
+    Used by :func:`plan_crosslink` to skip linking a candidate whose
+    match falls inside a PNP whose **whole text** is not itself a
+    candidate — see the user-facing rule "if 'Identity Tilt' appears
+    but only 'Identity' is linkable, don't link 'Identity'".
+    """
+    tokens = [(m.start(), m.end(), m.group(0)) for m in _PNP_TOKEN_RE.finditer(line)]
+    spans: list[tuple[int, int, str]] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        if not _is_capitalized(tokens[i][2]):
+            i += 1
+            continue
+        # Try to extend the run.  Track the last index that was
+        # Capitalized so we can trim trailing connectors (a PNP must
+        # END on a Capitalized word).
+        j = i
+        last_cap = i
+        while j + 1 < n:
+            # Tokens must be separated by exactly one space — anything
+            # else (punctuation, double space, line break) breaks the
+            # run.
+            gap_start = tokens[j][1]
+            gap_end = tokens[j + 1][0]
+            if line[gap_start:gap_end] != " ":
+                break
+            nxt = tokens[j + 1][2]
+            if _is_capitalized(nxt):
+                j += 1
+                last_cap = j
+            elif nxt in _PNP_CONNECTORS:
+                # Tentatively extend, but only commit the PNP up to
+                # last_cap unless we find another Capitalized word
+                # past this connector.
+                j += 1
+            else:
+                break
+        start = tokens[i][0]
+        end = tokens[last_cap][1]
+        spans.append((start, end, line[start:end]))
+        i = last_cap + 1
+    return spans
+
+
+def _enclosing_pnp(
+    pos: int, length: int, pnps: list[tuple[int, int, str]]
+) -> "str | None":
+    """Return the text of the PNP that fully contains [pos, pos+length),
+    or ``None`` if the range is not enclosed by any PNP.
+
+    Used by the crosslink matcher to decide whether a candidate match
+    is a *prefix* (or interior fragment) of a larger Proper Noun
+    Phrase, in which case linking it would be wrong — the user
+    intends the whole phrase to refer to a single (possibly not-yet-
+    written) concept.
+    """
+    end = pos + length
+    for s, e, text in pnps:
+        if s <= pos and end <= e:
+            return text
+    return None
+
+
 def _simplify_wikilinks_on_line(
     line: str,
     *,
@@ -1179,6 +1293,13 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
         # ----------------------------------------------------------------
         # Pass 2: insert new wikilinks for unlinked mentions.
         # ----------------------------------------------------------------
+        # Pre-compute the line's Proper Noun Phrase spans so the
+        # matcher can skip a candidate whose match is a strict
+        # fragment of a larger PNP that isn't itself a linkable term
+        # (e.g. don't link 'Identity' inside 'Identity Tilt' when only
+        # 'Identity' is registered).  Recomputed lazily on each
+        # iteration because earlier replacements may have rewritten
+        # the line.
         for pat, match_text, target, is_kind_target in patterns:
             if match_text in linked_texts:
                 continue
@@ -1187,6 +1308,7 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
             # on this line) so that position lookups and span checks are always
             # consistent with the current state of the string.
             spans = _wikilink_spans(new_line)
+            pnps = _proper_noun_phrase_spans(new_line)
             m = pat.search(new_line)
             if m is None:
                 continue
@@ -1196,6 +1318,18 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
 
             # Skip if this occurrence sits inside an existing wikilink
             if _is_in_span(start, length, spans):
+                continue
+
+            # Skip if this match is a strict fragment of a larger
+            # Proper Noun Phrase that isn't itself a linkable term.
+            # The PNP is "linkable" iff its exact text appears in the
+            # candidate set (seen_texts) — in that case the long-first
+            # candidate sort already handled it on an earlier iteration
+            # and this short fragment would be inside a wikilink span,
+            # which we just checked above.
+            enclosing = _enclosing_pnp(start, length, pnps)
+            if enclosing is not None and enclosing != match_text \
+                    and enclosing not in seen_texts:
                 continue
 
             # Choose the shortest valid wikilink path.
