@@ -970,6 +970,60 @@ def execute_crosslink(plan: CrosslinkPlan) -> None:
     plan.md_file.write_text("".join(lines), encoding="utf-8")
 
 
+def plan_crosslink_folder(
+    project: Path,
+    target_path: str,
+    namespace_path: str,
+) -> tuple[list[CrosslinkPlan], str]:
+    """Build a CrosslinkPlan for every entity reachable from *target_path*.
+
+    *target_path* is relative to ``content/`` and may be either:
+
+      * a single entity folder (containing ``index.md`` with
+        frontmatter) — yields exactly one plan; or
+      * any other directory under ``content/`` — walks it
+        recursively and yields one plan per entity found.
+
+    *namespace_path* is also relative to ``content/`` and scopes
+    which entities are candidates for linking, exactly as in
+    :func:`plan_crosslink`.
+
+    Returns ``(plans, error)``. When *error* is non-empty the plans
+    list is empty and nothing should be executed. Per-entity plans
+    that themselves carry an error (rare — only when an entity's
+    file disappears between the walk and the plan) are kept in the
+    list so callers can show them; ``execute_crosslink`` will
+    refuse to apply those.
+
+    Plans with no edits are still included so callers can print
+    "scanned N entities, M to update".
+    """
+    content = content_root(project).resolve()
+    target_dir = (content / target_path).resolve()
+
+    if not target_dir.is_dir():
+        return [], f"not a directory: content/{target_path}"
+
+    ns_dir = (content / namespace_path).resolve()
+    if not ns_dir.is_dir():
+        return [], f"namespace not found: content/{namespace_path}"
+
+    # Single-entity case: keep the simple plan_crosslink path.
+    if is_entity_folder(target_dir):
+        return [plan_crosslink(project, target_path, namespace_path)], ""
+
+    # Folder case: walk and plan each descendant entity.
+    plans: list[CrosslinkPlan] = []
+    for md_file in sorted(iter_entity_md_files(target_dir)):
+        entity_id = str(md_file.parent.relative_to(content))
+        plans.append(plan_crosslink(project, entity_id, namespace_path))
+
+    if not plans:
+        return [], f"no entities found under content/{target_path}"
+
+    return plans, ""
+
+
 # ---------------------------------------------------------------------------
 # Rename — reference scanning and execution
 # ---------------------------------------------------------------------------

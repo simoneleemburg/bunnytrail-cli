@@ -30,6 +30,7 @@ from .helpers import (
     list_kinds_tree,
     list_tree,
     plan_crosslink,
+    plan_crosslink_folder,
     plan_move,
     plan_move_kind,
     plan_rename,
@@ -672,35 +673,53 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
     article_path = _resolve(article_path)
     namespace_path = _resolve(namespace_path)
 
-    plan = plan_crosslink(project, article_path, namespace_path)
+    plans, batch_error = plan_crosslink_folder(project, article_path, namespace_path)
 
-    if plan.error:
-        print(f"  Error: {plan.error}")
+    if batch_error:
+        print(f"  Error: {batch_error}")
         return
 
-    print(f"  Article:   content/{plan.article_id}")
-    print(f"  Namespace: content/{plan.namespace}")
+    print(f"  Target:    content/{article_path}")
+    print(f"  Namespace: content/{namespace_path}")
+    print(f"  Articles:  {len(plans)}")
 
-    if not plan.edits:
+    actionable = [p for p in plans if p.edits and not p.error]
+    erroring = [p for p in plans if p.error]
+
+    if erroring:
+        print(f"\n  Skipped ({len(erroring)}):")
+        for p in erroring:
+            print(f"    ! {p.article_id}: {p.error}")
+
+    if not actionable:
         print("  No matches found — nothing to link.")
         return
 
-    print(f"\n  Proposed wikilinks ({len(plan.edits)} line(s) affected):")
-    for edit in plan.edits:
-        print(f"    line {edit.line_no}:")
-        print(f"      - {edit.old_text.strip()}")
-        print(f"      + {edit.new_text.strip()}")
+    total_edits = sum(len(p.edits) for p in actionable)
+    print(
+        f"\n  Proposed wikilinks across {len(actionable)} article(s), "
+        f"{total_edits} line(s) affected:"
+    )
+    for p in actionable:
+        print(f"\n    content/{p.article_id}/index.md")
+        for edit in p.edits:
+            print(f"      line {edit.line_no}:")
+            print(f"        - {edit.old_text.strip()}")
+            print(f"        + {edit.new_text.strip()}")
 
     confirm = _ask(session, "\n  Proceed? [y/N]")
     if not confirm or confirm.lower() not in ("y", "yes"):
         print("  Cancelled.")
         return
 
-    try:
-        execute_crosslink(plan)
-        print(f"  Done.  Updated content/{plan.article_id}/index.md")
-    except Exception as exc:
-        print(f"  Error during crosslink: {exc}")
+    for p in actionable:
+        try:
+            execute_crosslink(p)
+        except Exception as exc:
+            print(f"  Error during crosslink for {p.article_id}: {exc}")
+            return
+
+    print(f"  Done.  Updated {len(actionable)} article(s).")
 
 
 def _cmd_help() -> None:
@@ -720,7 +739,7 @@ def _cmd_help() -> None:
   move <entity-path> <new-parent>       move entity and rewrite all references
   move --kind <kind-path> <new-parent>  move kind within content_meta/kinds/ (no ref rewrites)
   rename <old-path> <new-slug>          rename entity or kind slug, rewrite all references
-  crosslink <article-path> <namespace>  insert wikilinks into article prose
+  crosslink <path> <namespace>          insert wikilinks (entity or folder of entities)
   help                                  show this help
   exit / quit                           leave the shell
 

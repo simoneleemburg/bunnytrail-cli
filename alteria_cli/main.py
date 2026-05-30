@@ -10,7 +10,7 @@ Usage:
     alteria add kind PATH SINGULAR [PLURAL]
     alteria move <entity-path> <new-parent>
     alteria rename <old-path> <new-slug>
-    alteria crosslink <article-path> <namespace-path>
+    alteria crosslink <path> <namespace-path>
 
 All entities, collections, and kinds are authored as a single
 Markdown file with YAML frontmatter (``index.md``,
@@ -37,6 +37,7 @@ from .helpers import (
     list_kinds_tree,
     list_tree,
     plan_crosslink,
+    plan_crosslink_folder,
     plan_move,
     plan_move_kind,
     plan_rename,
@@ -456,40 +457,66 @@ def crosslink(
 ) -> None:
     """Insert wikilinks into ARTICLE_PATH for entities and kinds found in NAMESPACE_PATH.
 
-    ARTICLE_PATH is relative to content/ (e.g. foundation/fabric/nearing).
-    NAMESPACE_PATH is relative to content/ and scopes which entities are
-    candidates for linking (e.g. aurethia/places).
+    ARTICLE_PATH is relative to content/ and may be either:
+
+      * a single entity folder (e.g. foundation/fabric/nearing) — only
+        that entity's index.md is updated; or
+      * any other folder under content/ (e.g. foundation/fabric) —
+        every entity reachable below it is crosslinked in one pass.
+
+    NAMESPACE_PATH is relative to content/ and scopes which entities
+    are candidates for linking (e.g. aurethia/places).
 
     Two sources of candidates are searched:
-      - Every entity found recursively under content/NAMESPACE_PATH, matched
-        by its display name (name: field).
+      - Every entity found recursively under content/NAMESPACE_PATH,
+        matched by its display name (name: field).
       - Every kind in content_meta/kinds/, matched by singular: and plural:.
 
     Matching is exact and whole-word.  Text already inside [[...]] wikilinks
-    is never re-linked.  Only the first occurrence of each name is linked.
+    is never re-linked.  Only the first occurrence of each name within
+    a given article is linked.  The shortest valid wikilink form for
+    each target is emitted — bare slug for same-cluster or universal
+    targets, full path otherwise.
 
     Use --dry-run to preview every change before committing.
     """
     root: Path = ctx.obj["root"]
 
-    plan = plan_crosslink(root, article_path.rstrip("/"), namespace_path.rstrip("/"))
+    plans, batch_error = plan_crosslink_folder(
+        root, article_path.rstrip("/"), namespace_path.rstrip("/")
+    )
 
-    if plan.error:
-        click.echo(f"Error: {plan.error}", err=True)
+    if batch_error:
+        click.echo(f"Error: {batch_error}", err=True)
         sys.exit(1)
 
-    click.echo(f"Article:   content/{plan.article_id}")
-    click.echo(f"Namespace: content/{plan.namespace}")
+    click.echo(f"Target:    content/{article_path.rstrip('/')}")
+    click.echo(f"Namespace: content/{namespace_path.rstrip('/')}")
+    click.echo(f"Articles:  {len(plans)}")
 
-    if not plan.edits:
+    actionable = [p for p in plans if p.edits and not p.error]
+    erroring = [p for p in plans if p.error]
+
+    if erroring:
+        click.echo(f"\nSkipped ({len(erroring)}):")
+        for p in erroring:
+            click.echo(f"  ! {p.article_id}: {p.error}")
+
+    if not actionable:
         click.echo("\nNo matches found — nothing to link.")
         return
 
-    click.echo(f"\nProposed wikilinks ({len(plan.edits)} line(s) affected):")
-    for edit in plan.edits:
-        click.echo(f"  line {edit.line_no}:")
-        click.echo(f"    - {edit.old_text.strip()}")
-        click.echo(f"    + {edit.new_text.strip()}")
+    total_edits = sum(len(p.edits) for p in actionable)
+    click.echo(
+        f"\nProposed wikilinks across {len(actionable)} article(s), "
+        f"{total_edits} line(s) affected:"
+    )
+    for p in actionable:
+        click.echo(f"\n  content/{p.article_id}/index.md")
+        for edit in p.edits:
+            click.echo(f"    line {edit.line_no}:")
+            click.echo(f"      - {edit.old_text.strip()}")
+            click.echo(f"      + {edit.new_text.strip()}")
 
     if dry_run:
         click.echo("\n(dry run — no files changed)")
@@ -498,13 +525,14 @@ def crosslink(
     if not yes:
         click.confirm("\nProceed?", abort=True)
 
-    try:
-        execute_crosslink(plan)
-    except Exception as exc:
-        click.echo(f"Error during crosslink: {exc}", err=True)
-        sys.exit(1)
+    for p in actionable:
+        try:
+            execute_crosslink(p)
+        except Exception as exc:
+            click.echo(f"Error during crosslink for {p.article_id}: {exc}", err=True)
+            sys.exit(1)
 
-    click.echo(f"\nDone.  Updated content/{plan.article_id}/index.md")
+    click.echo(f"\nDone.  Updated {len(actionable)} article(s).")
 
 
 # ---------------------------------------------------------------------------

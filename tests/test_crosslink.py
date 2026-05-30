@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from alteria_cli.helpers import execute_crosslink, plan_crosslink
+from alteria_cli.helpers import (
+    execute_crosslink,
+    plan_crosslink,
+    plan_crosslink_folder,
+)
 
 
 def _set_body(project: Path, entity_id: str, body: str) -> None:
@@ -39,3 +43,83 @@ def test_crosslink_kind_link_stays_kinds_prefix(project: Path) -> None:
     execute_crosslink(plan)
     body = _read_body(project, "aurethia/people/duskmere")
     assert "[[kinds/human|human]]" in body or "[[kinds/human]]" in body
+
+
+# ---------------------------------------------------------------------------
+# Folder mode
+# ---------------------------------------------------------------------------
+
+def test_crosslink_folder_returns_one_plan_per_entity(project: Path) -> None:
+    # Both bodies mention 'Sharazan' — folder mode should plan both.
+    _set_body(project, "aurethia/people/duskmere",
+              "I walked through Sharazan today.\n")
+    _set_body(project, "aurethia/people/languages/thallish",
+              "First spoken in Sharazan.\n")
+    plans, err = plan_crosslink_folder(
+        project, "aurethia/people", "aurethia/places"
+    )
+    assert err == ""
+    ids = {p.article_id for p in plans}
+    assert "aurethia/people/duskmere" in ids
+    assert "aurethia/people/languages/thallish" in ids
+    actionable = [p for p in plans if p.edits]
+    assert len(actionable) >= 2
+
+
+def test_crosslink_folder_executes_all_actionable_plans(project: Path) -> None:
+    _set_body(project, "aurethia/people/duskmere",
+              "I walked through Sharazan today.\n")
+    _set_body(project, "aurethia/people/languages/thallish",
+              "First spoken in Sharazan.\n")
+    plans, err = plan_crosslink_folder(
+        project, "aurethia/people", "aurethia/places"
+    )
+    assert err == ""
+    for p in plans:
+        if p.edits and not p.error:
+            execute_crosslink(p)
+    assert "[[sharazan|Sharazan]]" in _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan|Sharazan]]" in _read_body(
+        project, "aurethia/people/languages/thallish"
+    )
+
+
+def test_crosslink_folder_falls_through_to_single_entity(project: Path) -> None:
+    # When the target IS an entity folder, folder-mode just yields one plan.
+    _set_body(project, "aurethia/people/duskmere",
+              "Sharazan calls.\n")
+    plans, err = plan_crosslink_folder(
+        project, "aurethia/people/duskmere", "aurethia/places"
+    )
+    assert err == ""
+    assert len(plans) == 1
+    assert plans[0].article_id == "aurethia/people/duskmere"
+
+
+def test_crosslink_folder_missing_directory(project: Path) -> None:
+    plans, err = plan_crosslink_folder(
+        project, "nonexistent/path", "aurethia/places"
+    )
+    assert plans == []
+    assert "not a directory" in err
+
+
+def test_crosslink_folder_empty_directory_reports_no_entities(
+    project: Path,
+) -> None:
+    # Create an empty folder under content/ — no descendant entities.
+    empty = project / "content" / "aurethia" / "empty-shelf"
+    empty.mkdir()
+    plans, err = plan_crosslink_folder(
+        project, "aurethia/empty-shelf", "aurethia/places"
+    )
+    assert plans == []
+    assert "no entities found" in err
+
+
+def test_crosslink_folder_missing_namespace(project: Path) -> None:
+    plans, err = plan_crosslink_folder(
+        project, "aurethia/people", "nope/nowhere"
+    )
+    assert plans == []
+    assert "namespace not found" in err
