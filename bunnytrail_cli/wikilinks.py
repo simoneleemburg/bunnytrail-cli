@@ -2,10 +2,11 @@
 wikilinks.py — single source of truth for parsing and resolving
 `[[…]]` wikilinks inside bunnytrail content prose.
 
-This module mirrors the contract laid out in WIKILINKS.md. It is the
-authoritative parser for every tool that needs to scan or rewrite
-wikilinks (move, rename, crosslink). Keep it aligned with WIKILINKS.md;
-do not reimplement the rules elsewhere.
+This module mirrors the contract laid out in the bunnytrail spec at
+https://github.com/simoneleemburg/bunnytrail/blob/main/WIKILINKS.md.
+It is the authoritative parser for every tool that needs to scan or
+rewrite wikilinks (move, rename, crosslink). Keep it aligned with the
+spec; do not reimplement the rules elsewhere.
 
 The resolver intentionally does not load YAML — it only needs:
 
