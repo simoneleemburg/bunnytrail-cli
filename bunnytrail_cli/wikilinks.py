@@ -1,6 +1,6 @@
 """
 wikilinks.py — single source of truth for parsing and resolving
-`[[…]]` wikilinks inside Alteria prose.
+`[[…]]` wikilinks inside bunnytrail content prose.
 
 This module mirrors the contract laid out in WIKILINKS.md. It is the
 authoritative parser for every tool that needs to scan or rewrite
@@ -217,7 +217,7 @@ def build_index(project: Path) -> WikilinkIndex:
 
 # A single [[...]] occurrence. The inner content captures everything
 # between the brackets so the parser can classify it. We deliberately
-# allow the rich set of inner characters used by Alteria links
+# allow the rich set of inner characters used by wikilinks
 # (lowercase, digits, hyphen, slash, colon, hash, pipe, space — though
 # spaces ultimately disqualify the token below).
 WIKILINK_RE = re.compile(r"\[\[(?P<inner>[^\[\]\n]+?)\]\]")

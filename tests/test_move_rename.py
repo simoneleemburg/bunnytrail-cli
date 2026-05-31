@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from alteria_cli.helpers import (
+from bunnytrail_cli.helpers import (
     execute_move,
     execute_rename,
     plan_move,

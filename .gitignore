@@ -1,6 +1,24 @@
-.venv/
+# Python
 __pycache__/
+*.py[cod]
 *.egg-info/
-*.pyc
-dist/
+*.egg
+.eggs/
 build/
+dist/
+
+# Venv
+.venv/
+venv/
+env/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/

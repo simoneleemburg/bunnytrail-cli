@@ -1,9 +1,9 @@
 """
-repl.py — interactive shell for the Alteria CLI.
+repl.py — interactive shell for the bunnytrail CLI.
 
-Run via `alteria shell`.  Provides a prompt_toolkit REPL with:
+Run via `bt shell`.  Provides a prompt_toolkit REPL with:
   - context-aware tab completion (paths, kinds, commands)
-  - persistent history (~/.alteria_history)
+  - persistent history (~/.bt_history)
   - a virtual cwd inside content/ that you can cd around
   - interactive fallback prompts when params are omitted
 """
@@ -43,7 +43,7 @@ from .helpers import (
 # Constants
 # ---------------------------------------------------------------------------
 
-HISTORY_FILE = Path.home() / ".alteria_history"
+HISTORY_FILE = Path.home() / ".bt_history"
 
 STYLE = Style.from_dict(
     {
@@ -129,7 +129,7 @@ def _all_kind_ids(kinds_base: Path) -> list[str]:
 # Completer
 # ---------------------------------------------------------------------------
 
-class AlteriaCompleter(Completer):
+class BunnytrailCompleter(Completer):
     def __init__(self, project: Path) -> None:
         self.project = project
         self._content = content_root(project)
@@ -809,7 +809,7 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
 def _print_collisions(plan) -> None:
     """Print a 'name clash' warning for a move/rename plan in the REPL.
 
-    Mirrors :func:`alteria_cli.main._print_collisions` but uses the
+    Mirrors :func:`bunnytrail_cli.main._print_collisions` but uses the
     REPL's two-space indent and plain ``print``.
     """
     peers = getattr(plan, "collisions", None) or []
@@ -882,7 +882,7 @@ def run_shell(project: Path) -> None:
     content = content_root(project)
     cwd = content
 
-    completer = AlteriaCompleter(project)
+    completer = BunnytrailCompleter(project)
     session: PromptSession = PromptSession(
         history=FileHistory(str(HISTORY_FILE)),
         completer=completer,
@@ -890,7 +890,7 @@ def run_shell(project: Path) -> None:
         style=STYLE,
     )
 
-    print("Alteria shell.  Type 'help' for commands, 'exit' to quit.")
+    print("bunnytrail shell.  Type 'help' for commands, 'exit' to quit.")
     print(f"Root: {project}\n")
 
     while True:
@@ -902,7 +902,7 @@ def run_shell(project: Path) -> None:
             rel_str = str(cwd)
 
         prompt_parts = [
-            ("class:prompt.cluster", "alteria"),
+            ("class:prompt.cluster", "bt"),
             ("class:prompt.path", f"/{rel_str}" if rel_str else ""),
             ("class:prompt.arrow", " > "),
         ]

@@ -1,16 +1,16 @@
 """
-main.py — Alteria CLI entry point.
+main.py — bunnytrail CLI (`bt`) entry point.
 
 Usage:
-    alteria shell                   interactive REPL (recommended)
-    alteria hello
-    alteria tree [--kinds] [--depth N] [PATH]
-    alteria add entity PATH NAME KIND
-    alteria add collection PATH
-    alteria add kind PATH SINGULAR [PLURAL]
-    alteria move <entity-path> <new-parent>
-    alteria rename <old-path> <new-slug>
-    alteria crosslink <path> <namespace-path>
+    bt shell                   interactive REPL (recommended)
+    bt hello
+    bt tree [--kinds] [--depth N] [PATH]
+    bt add entity PATH NAME KIND
+    bt add collection PATH
+    bt add kind PATH SINGULAR [PLURAL]
+    bt move <entity-path> <new-parent>
+    bt rename <old-path> <new-slug>
+    bt crosslink <path> <namespace-path>
 
 All entities, collections, and kinds are authored as a single
 Markdown file with YAML frontmatter (``index.md``,
@@ -54,7 +54,7 @@ from .helpers import (
 @click.group()
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """Alteria worldbuilding compendium CLI."""
+    """bunnytrail authoring CLI."""
     ctx.ensure_object(dict)
     try:
         ctx.obj["root"] = find_project_root()
@@ -72,7 +72,7 @@ def cli(ctx: click.Context) -> None:
 def hello(ctx: click.Context) -> None:
     """Print a greeting and confirm the project root was found."""
     root: Path = ctx.obj["root"]
-    click.echo("Hello from the Alteria CLI.")
+    click.echo("Hello from the bunnytrail CLI.")
     click.echo(f"Project root: {root}")
 
     # Quick stats
@@ -92,7 +92,7 @@ def hello(ctx: click.Context) -> None:
 @cli.command()
 @click.pass_context
 def shell(ctx: click.Context) -> None:
-    """Start the interactive Alteria shell with tab completion."""
+    """Start the interactive bunnytrail shell with tab completion."""
     from .repl import run_shell  # local import keeps startup fast
     run_shell(ctx.obj["root"])
 

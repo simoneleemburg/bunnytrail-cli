@@ -36,7 +36,7 @@ def find_project_root(start: Path | None = None) -> Path:
         if (candidate / "content").is_dir() and (candidate / "STRUCTURE.md").is_file():
             return candidate
     raise FileNotFoundError(
-        "Could not find the Alteria project root.  "
+        "Could not find the bunnytrail project root.  "
         "Run the command from inside the repository."
     )
 

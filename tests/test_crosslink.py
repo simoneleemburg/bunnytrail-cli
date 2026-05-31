@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from alteria_cli.helpers import (
+from bunnytrail_cli.helpers import (
     execute_crosslink,
     plan_crosslink,
     plan_crosslink_folder,
@@ -269,14 +269,14 @@ def test_crosslink_warn_still_links_but_tags_edit(project: Path) -> None:
 
 
 def test_crosslink_config_loader_missing_file(project: Path) -> None:
-    from alteria_cli.helpers import load_crosslink_config
+    from bunnytrail_cli.helpers import load_crosslink_config
     cfg = load_crosslink_config(project)
     assert cfg.never == set()
     assert cfg.warn == set()
 
 
 def test_crosslink_config_loader_parses_lists(project: Path) -> None:
-    from alteria_cli.helpers import load_crosslink_config
+    from bunnytrail_cli.helpers import load_crosslink_config
     _write_crosslink_yml(
         project,
         "# a comment\n"

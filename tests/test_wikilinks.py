@@ -1,5 +1,5 @@
 """
-Tests for alteria_cli.wikilinks — index building, parsing, resolution,
+Tests for bunnytrail_cli.wikilinks — index building, parsing, resolution,
 and preferred_form selection.
 """
 from __future__ import annotations
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from alteria_cli.wikilinks import (
+from bunnytrail_cli.wikilinks import (
     ParsedLink,
     build_index,
     cluster_of,
@@ -302,7 +302,7 @@ def test_preferred_form_universal_to_universal_uses_bare(project: Path) -> None:
 
 
 def test_scope_of_returns_cluster_and_universal(project: Path) -> None:
-    from alteria_cli.wikilinks import scope_of
+    from bunnytrail_cli.wikilinks import scope_of
     idx = build_index(project)
     assert scope_of("aurethia/places/sharazan", idx) == "aurethia"
     assert scope_of("earth/places/shanghai", idx) == "earth"

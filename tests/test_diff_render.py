@@ -17,7 +17,7 @@ import os
 
 import pytest
 
-from alteria_cli.helpers import format_diff_pair, use_color
+from bunnytrail_cli.helpers import format_diff_pair, use_color
 
 
 def test_plain_output_matches_legacy_format() -> None:
