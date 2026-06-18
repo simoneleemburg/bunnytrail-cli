@@ -35,6 +35,7 @@ from .helpers import (
     list_kinds_tree,
     list_tree,
     load_bt_config,
+    load_world_config,
     plan_crosslink,
     plan_crosslink_folder,
     plan_move,
@@ -149,22 +150,24 @@ def _all_kind_ids(kinds_base: Path) -> list[str]:
 
 def _entity_parent_dirs_by_kind(
     content: Path,
-    kind_id: str,
+    kind_ids: "str | list[str]",
     cwd: Path,
 ) -> list[str]:
     """
     Return content-relative parent-directory strings for all existing entities
-    whose ``kind:`` field matches *kind_id*, ordered by proximity to *cwd*.
+    whose ``kind:`` field matches any of *kind_ids*, ordered by proximity to *cwd*.
 
-    E.g. if cwd is ``content/aurethia/places`` and there are entities with
-    kind=planet in ``aurethia/places/celestial/`` and ``solara/places/``, you
-    get ``['aurethia/places/celestial', 'solara/places']``.
+    *kind_ids* may be a single slug string or a list of slugs.  An empty list
+    means no filtering — all entity parent dirs are returned.
     """
     from .helpers import frontmatter_lines
     from .helpers import _parse_yaml_field  # type: ignore[attr-defined]
 
+    if isinstance(kind_ids, str):
+        kind_ids = [kind_ids]
+    kind_set = set(kind_ids)  # empty set → accept all
+
     seen: set[str] = set()
-    # Map (distance, rel_str) → rel_str for sorting
     results: list[tuple[int, str]] = []
 
     for index_md in content.rglob("index.md"):
@@ -174,7 +177,7 @@ def _entity_parent_dirs_by_kind(
         except OSError:
             continue
         entity_kind = _parse_yaml_field(fm, "kind")
-        if entity_kind != kind_id:
+        if kind_set and entity_kind not in kind_set:
             continue
         parent = entity_dir.parent
         try:
@@ -184,16 +187,13 @@ def _entity_parent_dirs_by_kind(
         if rel in seen:
             continue
         seen.add(rel)
-        # Distance: count of path parts not shared with cwd
         try:
             cwd_rel = cwd.relative_to(content)
             cwd_parts = cwd_rel.parts
         except ValueError:
             cwd_parts = ()
         parent_parts = Path(rel).parts if rel != "." else ()
-        shared = sum(
-            1 for a, b in zip(cwd_parts, parent_parts) if a == b
-        )
+        shared = sum(1 for a, b in zip(cwd_parts, parent_parts) if a == b)
         distance = len(cwd_parts) + len(parent_parts) - 2 * shared
         results.append((distance, rel))
 
@@ -292,12 +292,12 @@ class _MultiPathCompleter(Completer):
 
 class _KindSuggestedPathCompleter(Completer):
     """
-    Completer for the ``add entity`` path prompt.
+    Completer for content-path prompts that can be narrowed by kind.
 
-    When the buffer is empty (or all-whitespace), surfaces suggested
-    parent directories in priority order:
-      1. Folders that already contain entities of *kind_id*, closest to
-         *cwd* first.
+    When the buffer is empty, surfaces suggested parent directories:
+      1. Folders containing entities of any of *kind_ids* (closest to *cwd*
+         first).  Pass an empty list to skip kind-filtering and show nothing
+         in suggestion mode (only typing-mode completion is active).
       2. Any *recent_collections* added this session (content-relative).
 
     Once the user starts typing, falls back to normal cwd-relative /
@@ -308,12 +308,12 @@ class _KindSuggestedPathCompleter(Completer):
         self,
         content: Path,
         cwd: Path,
-        kind_id: str,
-        recent_collections: "Sequence[str]",
+        kind_ids: "list[str]",
+        recent_collections: "Sequence[str]" = (),
     ) -> None:
         self._content = content
         self._cwd = cwd
-        self._kind_id = kind_id
+        self._kind_ids = kind_ids
         self._recent_collections = list(recent_collections)
 
     def get_completions(
@@ -325,19 +325,15 @@ class _KindSuggestedPathCompleter(Completer):
             # ── Suggestion mode: show ranked candidates ──────────────────
             seen: set[str] = set()
 
-            # 1. Folders with same-kind entities
-            for rel in _entity_parent_dirs_by_kind(
-                self._content, self._kind_id, self._cwd
-            ):
-                if rel in seen:
-                    continue
-                seen.add(rel)
-                display = rel + "/"
-                yield Completion(
-                    rel + "/",
-                    start_position=0,
-                    display=display,
-                )
+            # 1. Folders with matching-kind entities (or all if kind_ids empty)
+            if self._kind_ids:
+                for rel in _entity_parent_dirs_by_kind(
+                    self._content, self._kind_ids, self._cwd
+                ):
+                    if rel in seen:
+                        continue
+                    seen.add(rel)
+                    yield Completion(rel + "/", start_position=0, display=rel + "/")
 
             # 2. Recently-added collections (content-relative paths)
             for rel in self._recent_collections:
@@ -641,7 +637,7 @@ def _cmd_add(
 
         # 2. Ask path, with kind-aware suggestions
         if path is None:
-            suggested = _entity_parent_dirs_by_kind(content, kind_id, cwd)
+            suggested = _entity_parent_dirs_by_kind(content, [kind_id], cwd)
             if suggested or recent_collections:
                 hint_parts = []
                 if suggested:
@@ -654,7 +650,7 @@ def _cmd_add(
                     + ")"
                 )
             path_completer = _KindSuggestedPathCompleter(
-                content, cwd, kind_id, recent_collections
+                content, cwd, [kind_id], recent_collections
             )
             path = _ask("path", completer=path_completer, default=".")
             if path is None:
@@ -672,15 +668,57 @@ def _cmd_add(
 
         summary = _ask("summary (optional)")  # empty → omitted
 
+        # Load world schema and bt config once for all prompts below
+        bt_cfg = load_bt_config(project)
+        world_cfg = load_world_config(project)
+
         # Ask for class: if this kind is configured to require one
         entity_class: "str | None" = None
-        bt_cfg = load_bt_config(project)
         if kind_id in bt_cfg.add.class_for_kinds:
             entity_class = _ask(
                 "class",
                 complete_from_cwd=(cwd, content),
             )
             # empty answer → skip the field silently
+
+        # Ask for applicable properties (those unrestricted or matching kind)
+        prop_values: "dict[str, str]" = {}
+        for prop in world_cfg.applicable_properties(kind_id):
+            hint = f"  [{', '.join(prop.values[:4])}{'…' if len(prop.values) > 4 else ''}]" if prop.values else ""
+            label = f"{prop.slug} (optional){hint}"
+            val = _ask(label, completer=prop.values if prop.values else None)  # type: ignore[arg-type]
+            if val:
+                prop_values[prop.slug] = val
+
+        # Ask for relations (repeating until the user enters nothing for kind)
+        applicable_rels = world_cfg.applicable_relations(kind_id)
+        applicable_rel_slugs = [r.slug for r in applicable_rels]
+        rel_by_slug = {r.slug: r for r in applicable_rels}
+        relation_entries: "list[dict[str, str]]" = []
+        if applicable_rel_slugs:
+            print("  relations — enter a relation kind and target (empty kind to finish):")
+            while True:
+                rel_kind = _ask("  rel kind", completer=applicable_rel_slugs)  # type: ignore[arg-type]
+                if not rel_kind:
+                    break
+                # Narrow target suggestions by the relation's codomain (if any)
+                rel_def = rel_by_slug.get(rel_kind)
+                codomain = rel_def.codomain if rel_def else []
+                if codomain:
+                    target_completer = _KindSuggestedPathCompleter(
+                        content, cwd, codomain
+                    )
+                    print(
+                        f"  (Tab to see targets for '{rel_kind}'"
+                        f"; kinds: {', '.join(codomain)})"
+                    )
+                    rel_target = _ask("  rel target", completer=target_completer)
+                else:
+                    rel_target = _ask("  rel target", complete_from_cwd=(cwd, content))
+                if not rel_target:
+                    break
+                rel_target = rel_target.strip("/")
+                relation_entries.append({"kind": rel_kind, "target": rel_target})
 
         # Resolve path: leading '/' means relative to content root, else relative to cwd
         path = path.rstrip("/")
@@ -709,11 +747,21 @@ def _cmd_add(
         entity_dir.mkdir(parents=True, exist_ok=True)
         fm = f"name: {name}\nkind: {kind_id}"
         if entity_class:
-            # Normalise: strip leading slash and trailing slash
             entity_class = entity_class.strip("/")
             fm += f"\nclass: {entity_class}"
         if summary:
             fm += f"\nsummary: {summary}"
+        for prop_slug, prop_val in prop_values.items():
+            # Quote values that contain special YAML characters
+            if any(c in prop_val for c in (':',  '#', '[', ']', '{', '}', '&', '*', '!', '|', '>', "'", '"')):
+                fm += f'\n{prop_slug}: "{prop_val}"'
+            else:
+                fm += f"\n{prop_slug}: {prop_val}"
+        if relation_entries:
+            fm += "\nrelations:"
+            for entry in relation_entries:
+                fm += f"\n  - kind: {entry['kind']}"
+                fm += f"\n    target: {entry['target']}"
         write_frontmatter_md(md_file, fm)
         print(f"  created {md_file.relative_to(project)}")
         return None

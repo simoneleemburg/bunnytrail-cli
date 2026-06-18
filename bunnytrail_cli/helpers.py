@@ -19,6 +19,8 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
 
 # ---------------------------------------------------------------------------
 # Root resolution
@@ -971,6 +973,112 @@ def load_bt_config(project: Path) -> BtConfig:
 def load_crosslink_config(project: Path) -> CrosslinkConfig:
     """Convenience shim — returns the crosslink section of :func:`load_bt_config`."""
     return load_bt_config(project).crosslink
+
+
+# ---------------------------------------------------------------------------
+# world.md — world-level schema (relations and properties)
+# ---------------------------------------------------------------------------
+
+_WORLD_MD_PATH = "content_meta/world.md"
+
+
+@dataclass
+class RelationDef:
+    """One relation kind from ``world.md``."""
+    slug: str
+    out_label: str = ""
+    in_label: str = ""
+    domain: list[str] = field(default_factory=list)    # kind slugs; empty = unrestricted
+    codomain: list[str] = field(default_factory=list)  # kind slugs; empty = unrestricted
+
+
+@dataclass
+class PropertyDef:
+    """One property from ``world.md``."""
+    slug: str
+    label: str = ""
+    allowed_kinds: list[str] = field(default_factory=list)  # empty = unrestricted
+    values: list[str] = field(default_factory=list)          # empty = free text
+
+
+@dataclass
+class WorldConfig:
+    """Parsed ``relations:`` and ``properties:`` from ``content_meta/world.md``."""
+    relations: list[RelationDef] = field(default_factory=list)
+    properties: list[PropertyDef] = field(default_factory=list)
+
+    def applicable_relations(self, kind_id: str) -> list[RelationDef]:
+        """Relations whose ``domain`` includes *kind_id* or is unrestricted."""
+        return [r for r in self.relations if not r.domain or kind_id in r.domain]
+
+    def applicable_properties(self, kind_id: str) -> list[PropertyDef]:
+        """Properties whose ``allowed_kinds`` includes *kind_id* or is unrestricted."""
+        return [p for p in self.properties if not p.allowed_kinds or kind_id in p.allowed_kinds]
+
+
+def _as_str_list(val: object) -> list[str]:
+    """Coerce a YAML value to a list of strings (handles list, str, or None)."""
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return [str(v) for v in val]
+    return [str(val)]
+
+
+def load_world_config(project: Path) -> WorldConfig:
+    """Parse ``content_meta/world.md`` and return a :class:`WorldConfig`.
+
+    Returns an empty config if the file is missing or has no frontmatter.
+    Uses PyYAML to parse the frontmatter block so inline lists and quoted
+    strings are handled correctly.
+    """
+    world_md = project / _WORLD_MD_PATH
+    if not world_md.is_file():
+        return WorldConfig()
+
+    text = world_md.read_text(encoding="utf-8")
+    fm, _ = split_frontmatter(text)
+    if fm is None:
+        return WorldConfig()
+
+    try:
+        data = yaml.safe_load(fm)
+    except yaml.YAMLError:
+        return WorldConfig()
+
+    if not isinstance(data, dict):
+        return WorldConfig()
+
+    # ── relations ──────────────────────────────────────────────────────────
+    relations: list[RelationDef] = []
+    raw_rels = data.get("relations") or {}
+    if isinstance(raw_rels, dict):
+        for slug, defn in raw_rels.items():
+            if not isinstance(defn, dict):
+                defn = {}
+            relations.append(RelationDef(
+                slug=str(slug),
+                out_label=str(defn.get("outLabel") or ""),
+                in_label=str(defn.get("inLabel") or ""),
+                domain=_as_str_list(defn.get("domain")),
+                codomain=_as_str_list(defn.get("codomain")),
+            ))
+
+    # ── properties ─────────────────────────────────────────────────────────
+    properties: list[PropertyDef] = []
+    raw_props = data.get("properties") or {}
+    if isinstance(raw_props, dict):
+        for slug, defn in raw_props.items():
+            if not isinstance(defn, dict):
+                defn = {}
+            properties.append(PropertyDef(
+                slug=str(slug),
+                label=str(defn.get("label") or slug),
+                allowed_kinds=_as_str_list(defn.get("allowedKinds")),
+                values=_as_str_list(defn.get("values")),
+            ))
+
+    return WorldConfig(relations=relations, properties=properties)
 
 
 @dataclass
