@@ -2,7 +2,8 @@
 repl.py — interactive shell for the bunnytrail CLI.
 
 Run via `bt shell`.  Provides a prompt_toolkit REPL with:
-  - context-aware tab completion (paths, kinds, commands)
+  - context-aware menu completion (paths, kinds, commands) — Tab opens a menu,
+    arrow keys navigate, Enter selects
   - persistent history (~/.bt_history)
   - a virtual cwd inside content/ that you can cd around
   - interactive fallback prompts when params are omitted
@@ -11,12 +12,15 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion, WordCompleter
+from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.styles import Style
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts import CompleteStyle
 
 from .helpers import (
     content_root,
@@ -45,14 +49,6 @@ from .helpers import (
 
 HISTORY_FILE = Path.home() / ".bt_history"
 
-STYLE = Style.from_dict(
-    {
-        "prompt.cluster": "ansigreen bold",
-        "prompt.path": "ansicyan",
-        "prompt.arrow": "ansiyellow bold",
-    }
-)
-
 TOP_LEVEL_COMMANDS = [
     "hello",
     "ls",
@@ -69,28 +65,61 @@ TOP_LEVEL_COMMANDS = [
 
 ADD_SUBCOMMANDS = ["entity", "collection", "kind"]
 
+# ANSI colour helpers
+_GREEN  = "\033[1;32m"
+_CYAN   = "\033[36m"
+_YELLOW = "\033[1;33m"
+_RESET  = "\033[0m"
+
 
 # ---------------------------------------------------------------------------
-# Completion helpers
+# Tab key binding: first Tab opens/advances menu, second Tab accepts & closes
 # ---------------------------------------------------------------------------
+
+def _make_tab_bindings() -> KeyBindings:
+    """
+    Custom Tab behaviour:
+      - No menu open  → open menu with first item pre-selected.
+      - Menu open, item highlighted → apply that completion and close the menu.
+      - Menu open, nothing highlighted yet → highlight the first item.
+    """
+    kb = KeyBindings()
+
+    @kb.add("tab")
+    def _tab(event) -> None:
+        buff = event.app.current_buffer
+        state = buff.complete_state
+
+        if state is None:
+            # No menu — open it and pre-select the first item.
+            buff.start_completion(select_first=True)
+        elif state.current_completion is not None:
+            # An item is highlighted — accept it and close the menu.
+            buff.apply_completion(state.current_completion)
+            buff.cancel_completion()
+        else:
+            # Menu is open but nothing highlighted — move to first item.
+            buff.complete_next()
+
+    return kb
 
 def _child_dirs(path: Path) -> list[str]:
-    """Sorted list of child directory names under *path*."""
+    """Sorted list of child directory names (with trailing /) under *path*."""
     try:
         return sorted(
-            p.name + "/" for p in path.iterdir() if p.is_dir() and not p.name.startswith(".")
+            p.name + "/" for p in path.iterdir()
+            if p.is_dir() and not p.name.startswith(".")
         )
-    except PermissionError:
+    except (PermissionError, FileNotFoundError):
         return []
 
 
-def _complete_fs_path(
-    fragment: str,
-    base: Path,
-) -> Iterable[Completion]:
+def _path_completions(fragment: str, base: Path) -> list[tuple[str, str]]:
     """
-    Given a partially-typed path fragment (relative to *base*), yield
-    Completion objects for matching sub-directories.
+    Return (replacement, display) pairs for a partial path fragment under *base*.
+
+    *replacement* is the full path text from the start of the fragment.
+    *display* is just the leaf name (what to show in the menu).
     """
     parts = fragment.split("/")
     prefix_parts = parts[:-1]
@@ -100,171 +129,220 @@ def _complete_fs_path(
     for p in prefix_parts:
         current = current / p
         if not current.is_dir():
-            return
+            return []
 
     prefix = "/".join(prefix_parts) + "/" if prefix_parts else ""
-
+    out: list[tuple[str, str]] = []
     for name in _child_dirs(current):
-        bare = name.rstrip("/")
-        if bare.startswith(partial_name):
-            display = name  # keep trailing slash for dirs
-            completion_text = prefix + name
-            # Replace what the user already typed
-            yield Completion(
-                completion_text,
-                start_position=-len(fragment),
-                display=display,
-            )
+        if name.rstrip("/").startswith(partial_name):
+            out.append((prefix + name, name))
+    return out
 
 
 def _all_kind_ids(kinds_base: Path) -> list[str]:
     """Return every kind folder name (leaf slug) found under *kinds_base*."""
-    ids: list[str] = []
-    for p in sorted(kinds_base.rglob("_kind.md")):
-        ids.append(p.parent.name)
-    return ids
+    return [p.parent.name for p in sorted(kinds_base.rglob("_kind.md"))]
+
+
+def _last_token_start(text: str) -> int:
+    """
+    Return the index in *text* where the last whitespace-delimited token begins.
+    If text ends in whitespace, returns len(text).
+    """
+    # Find last unescaped space
+    i = len(text) - 1
+    while i >= 0 and text[i] != " " and text[i] != "\t":
+        i -= 1
+    return i + 1
 
 
 # ---------------------------------------------------------------------------
-# Completer
+# prompt_toolkit completers
 # ---------------------------------------------------------------------------
 
-class BunnytrailCompleter(Completer):
+class _PathCompleter(Completer):
+    """Completes a path fragment by listing child directories under *base*."""
+
+    def __init__(self, base: Path) -> None:
+        self._base = base
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        text = document.text_before_cursor
+        for replacement, display in _path_completions(text, self._base):
+            yield Completion(
+                replacement,
+                start_position=-len(text),
+                display=display,
+            )
+
+
+class _MultiPathCompleter(Completer):
+    """Completes against multiple base directories (for `rename`)."""
+
+    def __init__(self, bases: Sequence[Path]) -> None:
+        self._bases = list(bases)
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        text = document.text_before_cursor
+        seen: set[str] = set()
+        for base in self._bases:
+            for replacement, display in _path_completions(text, base):
+                if replacement in seen:
+                    continue
+                seen.add(replacement)
+                yield Completion(
+                    replacement,
+                    start_position=-len(text),
+                    display=display,
+                )
+
+
+class _ShellCompleter(Completer):
+    """
+    Top-level completer for the main REPL prompt.  Parses the buffer to figure
+    out which command and which positional argument is being completed, then
+    delegates to path/word completion.
+    """
+
     def __init__(self, project: Path) -> None:
-        self.project = project
+        self._project = project
         self._content = content_root(project)
         self._kinds = kinds_root(project)
 
-    # prompt_toolkit calls this on every keystroke
-    def get_completions(self, document, complete_event):  # noqa: ANN001
-        text = document.text_before_cursor
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        line = document.text_before_cursor
         try:
-            tokens = shlex.split(text)
+            tokens = shlex.split(line)
         except ValueError:
-            tokens = text.split()
+            tokens = line.split()
 
-        # If text ends with space the user is starting a new token
-        trailing_space = text.endswith(" ")
+        trailing_space = line.endswith(" ") or line.endswith("\t")
         if trailing_space:
             tokens.append("")
 
         if not tokens:
-            for cmd in TOP_LEVEL_COMMANDS:
-                yield Completion(cmd, start_position=0)
+            yield from _yield_words(TOP_LEVEL_COMMANDS, "", 0)
             return
 
         cmd = tokens[0]
-        fragment = tokens[-1] if len(tokens) > 1 else ""
 
-        # ---- top-level command completion ---------------------------------
+        # top-level command completion
         if len(tokens) == 1 and not trailing_space:
-            for c in TOP_LEVEL_COMMANDS:
-                if c.startswith(cmd):
-                    yield Completion(c, start_position=-len(cmd))
+            yield from _yield_words(TOP_LEVEL_COMMANDS, cmd, -len(cmd))
             return
 
-        # ---- cd: complete content/ paths ----------------------------------
+        fragment = tokens[-1] if len(tokens) > 1 else ""
+        frag_start = -len(fragment) if fragment else 0
+
         if cmd == "cd":
             if len(tokens) == 2:
-                yield from _complete_fs_path(fragment, self._content)
-            return
+                yield from _yield_paths(fragment, self._content, frag_start)
 
-        # ---- tree: complete content/ paths (optional arg) -----------------
-        if cmd == "tree":
+        elif cmd == "tree":
             if len(tokens) == 2:
-                yield from _complete_fs_path(fragment, self._content)
-            return
+                yield from _yield_paths(fragment, self._content, frag_start)
 
-        # ---- add subcommand -----------------------------------------------
-        if cmd == "add":
+        elif cmd == "add":
             if len(tokens) == 2 and not trailing_space:
-                for sub in ADD_SUBCOMMANDS:
-                    if sub.startswith(fragment):
-                        yield Completion(sub, start_position=-len(fragment))
+                yield from _yield_words(ADD_SUBCOMMANDS, fragment, frag_start)
                 return
+            if len(tokens) >= 2:
+                sub = tokens[1]
+                if sub == "entity":
+                    if len(tokens) == 3:
+                        yield from _yield_paths(fragment, self._content, frag_start)
+                    elif len(tokens) == 5:
+                        yield from _yield_words(
+                            _all_kind_ids(self._kinds), fragment, frag_start
+                        )
+                elif sub == "collection":
+                    if len(tokens) == 3:
+                        yield from _yield_paths(fragment, self._content, frag_start)
+                elif sub == "kind":
+                    if len(tokens) == 3:
+                        yield from _yield_paths(fragment, self._kinds, frag_start)
 
-            if len(tokens) < 2:
-                return
-
-            sub = tokens[1]
-
-            # add entity <path> <name> <kind>
-            if sub == "entity":
-                if len(tokens) == 3:  # completing path
-                    yield from _complete_fs_path(fragment, self._content)
-                elif len(tokens) == 5:  # completing kind
-                    for kid in _all_kind_ids(self._kinds):
-                        if kid.startswith(fragment):
-                            yield Completion(kid, start_position=-len(fragment))
-                return
-
-            # add collection <path>
-            if sub == "collection":
-                if len(tokens) == 3:
-                    yield from _complete_fs_path(fragment, self._content)
-                return
-
-            # add kind <path>
-            if sub == "kind":
-                if len(tokens) == 3:
-                    yield from _complete_fs_path(fragment, self._kinds)
-                return
-
-        # ---- move <entity-path> <new-parent> --------------------------------
-        if cmd == "move":
-            # --kind flag switches completion base to kinds/
+        elif cmd == "move":
             has_kind_flag = "--kind" in tokens
             base = self._kinds if has_kind_flag else self._content
-            # Count non-flag tokens to determine which positional arg we're on
             pos_tokens = [t for t in tokens[1:] if not t.startswith("-")]
             pos_count = len(pos_tokens) + (1 if trailing_space else 0)
             if pos_count in (1, 2):
-                yield from _complete_fs_path(fragment, base)
-            return
+                yield from _yield_paths(fragment, base, frag_start)
 
-        # ---- rename <old-path> <new-slug> -----------------------------------
-        if cmd == "rename":
+        elif cmd == "rename":
             if len(tokens) == 2:
-                # Try content first, then kinds
-                yield from _complete_fs_path(fragment, self._content)
-                yield from _complete_fs_path(fragment, self._kinds)
-            # token 3 is a free-text slug — no completion
-            return
+                yield from _yield_paths(fragment, self._content, frag_start)
+                yield from _yield_paths(fragment, self._kinds, frag_start)
 
-        # ---- crosslink <article-path> <namespace-path> ----------------------
-        if cmd == "crosslink":
+        elif cmd == "crosslink":
             if len(tokens) in (2, 3):
-                yield from _complete_fs_path(fragment, self._content)
-            return
+                yield from _yield_paths(fragment, self._content, frag_start)
+
+
+def _yield_words(
+    words: Iterable[str], fragment: str, start_position: int
+) -> Iterable[Completion]:
+    for w in words:
+        if w.startswith(fragment):
+            yield Completion(w, start_position=start_position, display=w)
+
+
+def _yield_paths(
+    fragment: str, base: Path, start_position: int
+) -> Iterable[Completion]:
+    # start_position replaces the whole fragment (incl. any prefix slashes)
+    # so we re-emit replacement as-is.
+    for replacement, display in _path_completions(fragment, base):
+        yield Completion(
+            replacement,
+            start_position=start_position,
+            display=display,
+        )
 
 
 # ---------------------------------------------------------------------------
 # Interactive fallback prompt
 # ---------------------------------------------------------------------------
 
-class _PathCompleter(Completer):
-    """Single-use completer for a path rooted at *base*."""
-    def __init__(self, base: Path) -> None:
-        self._base = base
-
-    def get_completions(self, document, complete_event):  # noqa: ANN001
-        yield from _complete_fs_path(document.text_before_cursor, self._base)
-
-
 def _ask(
-    session: PromptSession,
     label: str,
-    completer: Optional[Completer] = None,
+    completer: Optional[object] = None,
+    complete_from: Optional[Path] = None,
+    complete_kinds: bool = False,
     default: str = "",
 ) -> Optional[str]:
-    """Prompt the user for a single value, returning None on Ctrl-C/Ctrl-D."""
+    """
+    Prompt for a single value with optional completion.
+
+    *complete_from* — if set, Tab completes paths under this directory.
+    *completer*     — if provided as a list of strings, completes against that list.
+                      If a Completer instance, used directly.
+    """
     hint = f" [{default}]" if default else ""
-    prompt_text = [
-        ("class:prompt.arrow", f"  {label}{hint}: "),
-    ]
+
+    pt_completer: Optional[Completer] = None
+    if complete_from is not None:
+        pt_completer = _PathCompleter(complete_from)
+    elif isinstance(completer, Completer):
+        pt_completer = completer
+    elif completer:
+        pt_completer = WordCompleter(list(completer), match_middle=False)
+
+    session: PromptSession = PromptSession(
+        completer=pt_completer,
+        complete_style=CompleteStyle.MULTI_COLUMN,
+        complete_while_typing=False,
+        key_bindings=_make_tab_bindings(),
+    )
     try:
-        value = session.prompt(prompt_text, completer=completer, complete_while_typing=False)
-        value = value.strip()
+        value = session.prompt(f"  {label}{hint}: ").strip()
         return value if value else (default or None)
     except (EOFError, KeyboardInterrupt):
         print("  (cancelled)")
@@ -291,11 +369,7 @@ def _cmd_ls(cwd: Path, content: Path) -> None:
     for child in sorted(cwd.iterdir()):
         if child.name.startswith("."):
             continue
-        # Hide internal underscore-files except the structural markers
-        # the user is likely to care about.
-        if child.name.startswith("_") and child.name not in (
-            "_collection.md",
-        ):
+        if child.name.startswith("_") and child.name not in ("_collection.md",):
             continue
         if child.is_dir():
             marker = "[E]" if is_entity_folder(child) else "[C]"
@@ -328,9 +402,6 @@ def _cmd_cd(cwd: Path, content: Path, args: list[str]) -> Path:
         if cwd != content:
             return cwd.parent
         return cwd
-    # Allow absolute-style paths (e.g. aurethia/places) from content root
-    candidate = (content / target_str) if not (cwd / target_str).is_dir() else (cwd / target_str)
-    # prefer relative first
     if (cwd / target_str).is_dir():
         candidate = cwd / target_str
     elif (content / target_str).is_dir():
@@ -341,13 +412,12 @@ def _cmd_cd(cwd: Path, content: Path, args: list[str]) -> Path:
     return candidate.resolve()
 
 
-def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) -> None:
+def _cmd_add(project: Path, cwd: Path, args: list[str]) -> None:
     content = content_root(project)
     kinds = kinds_root(project)
 
-    # ---- resolve subcommand ------------------------------------------------
     if not args:
-        sub = _ask(session, "add what?", WordCompleter(ADD_SUBCOMMANDS))
+        sub = _ask("add what?", completer=ADD_SUBCOMMANDS)  # type: ignore[arg-type]
         if not sub:
             return
     else:
@@ -358,34 +428,31 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
         print("  usage: add entity|collection|kind ...")
         return
 
-    # ---- add entity <path> <name> <kind> -----------------------------------
     if sub == "entity":
         path = args[1] if len(args) > 1 else None
         name = args[2] if len(args) > 2 else None
         kind_arg = args[3] if len(args) > 3 else None
 
         if path is None:
-            # Default the path to cwd expressed relative to content
             try:
                 default_path = str(cwd.relative_to(content))
             except ValueError:
                 default_path = ""
-            path = _ask(session, "path", _PathCompleter(content), default=default_path)
+            path = _ask("path", complete_from=content, default=default_path)
             if path is None:
                 return
 
         if name is None:
-            name = _ask(session, "name")
+            name = _ask("name")
             if not name:
                 return
 
         if kind_arg is None:
             kind_ids = _all_kind_ids(kinds)
-            kind_arg = _ask(session, "kind", WordCompleter(kind_ids, sentence=True))
+            kind_arg = _ask("kind", completer=kind_ids)  # type: ignore[arg-type]
             if not kind_arg:
                 return
 
-        # resolve entity dir (relative to cwd first, then content root)
         path = path.rstrip("/")
         if path == ".":
             entity_slug = name.lower().replace(" ", "-")
@@ -398,7 +465,6 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
             entity_dir = raw_dir / entity_slug
 
         md_file = entity_dir / "index.md"
-
         if md_file.exists():
             print(f"  already exists: {md_file.relative_to(project)}")
             return
@@ -412,7 +478,6 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
         print(f"  created {md_file.relative_to(project)}")
         return
 
-    # ---- add collection <path> <title> -------------------------------------
     if sub == "collection":
         path = args[1] if len(args) > 1 else None
         title = " ".join(args[2:]) if len(args) > 2 else None
@@ -422,12 +487,12 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
                 default_path = str(cwd.relative_to(content))
             except ValueError:
                 default_path = ""
-            path = _ask(session, "path", _PathCompleter(content), default=default_path)
+            path = _ask("path", complete_from=content, default=default_path)
             if path is None:
                 return
 
         if title is None:
-            title = _ask(session, "title")
+            title = _ask("title")
             if not title:
                 return
 
@@ -445,24 +510,23 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
         print(f"  created {md_file.relative_to(project)}")
         return
 
-    # ---- add kind <path> <singular> [plural] -------------------------------
     if sub == "kind":
         path = args[1] if len(args) > 1 else None
         singular = args[2] if len(args) > 2 else None
         plural = args[3] if len(args) > 3 else None
 
         if path is None:
-            path = _ask(session, "kinds path", _PathCompleter(kinds))
+            path = _ask("kinds path", complete_from=kinds)
             if path is None:
                 return
 
         if singular is None:
-            singular = _ask(session, "singular name")
+            singular = _ask("singular name")
             if not singular:
                 return
 
         if plural is None:
-            plural = _ask(session, "plural name", default=f"{singular}s")
+            plural = _ask("plural name", default=f"{singular}s")
             if not plural:
                 plural = f"{singular}s"
 
@@ -477,10 +541,9 @@ def _cmd_add(project: Path, cwd: Path, args: list[str], session: PromptSession) 
         return
 
 
-def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session: PromptSession) -> None:
+def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
     kinds = kinds_root(project)
 
-    # Parse --kind flag out of args
     is_kind = "--kind" in args
     args = [a for a in args if a != "--kind"]
 
@@ -492,23 +555,19 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session:
     parent_label = "new kinds parent" if is_kind else "new parent"
 
     if entity_path is None:
-        if is_kind:
-            entity_path = _ask(session, base_label, _PathCompleter(base))
-        else:
-            try:
-                default_path = str(cwd.relative_to(content))
-            except ValueError:
-                default_path = ""
-            entity_path = _ask(session, base_label, _PathCompleter(base), default=default_path)
+        try:
+            default_path = str(cwd.relative_to(content))
+        except ValueError:
+            default_path = ""
+        entity_path = _ask(base_label, complete_from=base, default=default_path)
         if not entity_path:
             return
 
     if new_parent is None:
-        new_parent = _ask(session, parent_label, _PathCompleter(base))
+        new_parent = _ask(parent_label, complete_from=base)
         if not new_parent:
             return
 
-    # Resolve relative to cwd (content only; kinds paths are always absolute-style)
     def _resolve_content(p: str) -> str:
         p = p.rstrip("/")
         if (cwd / p).is_dir():
@@ -563,7 +622,7 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session:
 
     _print_collisions(plan)
 
-    confirm = _ask(session, "\n  Proceed? [y/N]")
+    confirm = _ask("\n  Proceed? [y/N]")
     if not confirm or confirm.lower() not in ("y", "yes"):
         print("  Cancelled.")
         return
@@ -575,7 +634,7 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str], session:
         print(f"  Error during move: {exc}")
 
 
-def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], session: PromptSession) -> None:
+def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
     kinds = kinds_root(project)
     old_path = args[0] if len(args) > 0 else None
     new_slug = args[1] if len(args) > 1 else None
@@ -585,24 +644,20 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
             default_path = str(cwd.relative_to(content))
         except ValueError:
             default_path = ""
-        # Complete over both content and kinds
-        class _BothCompleter(Completer):
-            def __init__(self, c: Path, k: Path) -> None:
-                self._c, self._k = c, k
-            def get_completions(self, document, complete_event):  # noqa: ANN001
-                yield from _complete_fs_path(document.text_before_cursor, self._c)
-                yield from _complete_fs_path(document.text_before_cursor, self._k)
 
-        old_path = _ask(session, "entity or kind path", _BothCompleter(content, kinds), default=default_path)
+        old_path = _ask(
+            "entity or kind path",
+            completer=_MultiPathCompleter([content, kinds]),
+            default=default_path,
+        )
         if not old_path:
             return
 
     if new_slug is None:
-        new_slug = _ask(session, "new slug")
+        new_slug = _ask("new slug")
         if not new_slug:
             return
 
-    # Resolve relative to cwd first, then content root, then kinds root
     def _resolve(p: str) -> str:
         p = p.rstrip("/")
         if (cwd / p).is_dir():
@@ -615,11 +670,6 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
 
     old_path = _resolve(old_path)
 
-    # ------------------------------------------------------------------
-    # Detect entity vs kind so we know which display-name fields to
-    # prompt for.  These prompts default to the current value so
-    # hitting Enter is a no-op.
-    # ------------------------------------------------------------------
     from .helpers import (
         read_entity_display_name,
         read_kind_display_names,
@@ -629,11 +679,7 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
     if entity_dir.is_dir() and (entity_dir / "index.md").is_file():
         old_name = read_entity_display_name(entity_dir)
         if old_name:
-            answer = _ask(
-                session,
-                "new display name",
-                default=old_name,
-            )
+            answer = _ask("new display name", default=old_name)
             if answer and answer != old_name:
                 new_display["name"] = answer
     else:
@@ -641,19 +687,11 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
         if kind_dir.is_dir() and (kind_dir / "_kind.md").is_file():
             old_singular, old_plural = read_kind_display_names(kind_dir)
             if old_singular:
-                answer = _ask(
-                    session,
-                    "new singular",
-                    default=old_singular,
-                )
+                answer = _ask("new singular", default=old_singular)
                 if answer and answer != old_singular:
                     new_display["singular"] = answer
             if old_plural:
-                answer = _ask(
-                    session,
-                    "new plural",
-                    default=old_plural,
-                )
+                answer = _ask("new plural", default=old_plural)
                 if answer and answer != old_plural:
                     new_display["plural"] = answer
 
@@ -697,7 +735,7 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
 
     _print_collisions(plan)
 
-    confirm = _ask(session, "\n  Proceed? [y/N]")
+    confirm = _ask("\n  Proceed? [y/N]")
     if not confirm or confirm.lower() not in ("y", "yes"):
         print("  Cancelled.")
         return
@@ -709,7 +747,7 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str], sessio
         print(f"  Error during rename: {exc}")
 
 
-def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], session: PromptSession) -> None:
+def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
     article_path = args[0] if len(args) > 0 else None
     namespace_path = args[1] if len(args) > 1 else None
 
@@ -718,18 +756,15 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
             default_path = str(cwd.relative_to(content))
         except ValueError:
             default_path = ""
-        article_path = _ask(session, "article path", _PathCompleter(content), default=default_path)
+        article_path = _ask("article path", complete_from=content, default=default_path)
         if not article_path:
             return
 
     if namespace_path is None:
-        namespace_path = _ask(session, "namespace path", _PathCompleter(content))
+        namespace_path = _ask("namespace path", complete_from=content)
         if not namespace_path:
             return
 
-    # Resolve relative to cwd first, then content root, with a
-    # special-case for the content_meta/guides/ tree (whose paths
-    # we expose as guides/<slug>, not content/...).
     guides_dir = (project / "content_meta" / "guides").resolve()
 
     def _resolve(p: str) -> str:
@@ -790,7 +825,7 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
             print(old_line)
             print(new_line)
 
-    confirm = _ask(session, "\n  Proceed? [y/N]")
+    confirm = _ask("\n  Proceed? [y/N]")
     if not confirm or confirm.lower() not in ("y", "yes"):
         print("  Cancelled.")
         return
@@ -807,11 +842,6 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str], ses
 
 
 def _print_collisions(plan) -> None:
-    """Print a 'name clash' warning for a move/rename plan in the REPL.
-
-    Mirrors :func:`bunnytrail_cli.main._print_collisions` but uses the
-    REPL's two-space indent and plain ``print``.
-    """
     peers = getattr(plan, "collisions", None) or []
     if not peers:
         return
@@ -829,7 +859,6 @@ def _print_collisions(plan) -> None:
 
 
 def _print_crosslink_warnings(plans) -> None:
-    """Surface any ``warn:`` terms that were linked, grouped by term."""
     by_term: dict[str, list[tuple[str, str, int]]] = {}
     for plan in plans:
         for edit in plan.edits:
@@ -882,33 +911,33 @@ def run_shell(project: Path) -> None:
     content = content_root(project)
     cwd = content
 
-    completer = BunnytrailCompleter(project)
+    shell_completer = _ShellCompleter(project)
+    history = FileHistory(str(HISTORY_FILE))
     session: PromptSession = PromptSession(
-        history=FileHistory(str(HISTORY_FILE)),
-        completer=completer,
-        complete_while_typing=False,  # only complete on Tab
-        style=STYLE,
+        completer=shell_completer,
+        complete_style=CompleteStyle.MULTI_COLUMN,
+        complete_while_typing=False,
+        history=history,
+        key_bindings=_make_tab_bindings(),
     )
 
     print("bunnytrail shell.  Type 'help' for commands, 'exit' to quit.")
     print(f"Root: {project}\n")
 
     while True:
-        # Build a prompt that shows content-relative cwd
         try:
             rel = cwd.relative_to(content)
             rel_str = str(rel) if str(rel) != "." else ""
         except ValueError:
             rel_str = str(cwd)
 
-        prompt_parts = [
-            ("class:prompt.cluster", "bt"),
-            ("class:prompt.path", f"/{rel_str}" if rel_str else ""),
-            ("class:prompt.arrow", " > "),
-        ]
+        if rel_str:
+            prompt_text = f"{_GREEN}bt{_RESET}{_CYAN}/{rel_str}{_RESET}{_YELLOW} > {_RESET}"
+        else:
+            prompt_text = f"{_GREEN}bt{_RESET}{_YELLOW} > {_RESET}"
 
         try:
-            raw = session.prompt(prompt_parts)
+            raw = session.prompt(ANSI(prompt_text))
         except (EOFError, KeyboardInterrupt):
             print("\nBye.")
             break
@@ -938,13 +967,13 @@ def run_shell(project: Path) -> None:
         elif cmd == "cd":
             cwd = _cmd_cd(cwd, content, args)
         elif cmd == "add":
-            _cmd_add(project, cwd, args, session)
+            _cmd_add(project, cwd, args)
         elif cmd == "move":
-            _cmd_move(project, cwd, content, args, session)
+            _cmd_move(project, cwd, content, args)
         elif cmd == "rename":
-            _cmd_rename(project, cwd, content, args, session)
+            _cmd_rename(project, cwd, content, args)
         elif cmd == "crosslink":
-            _cmd_crosslink(project, cwd, content, args, session)
+            _cmd_crosslink(project, cwd, content, args)
         elif cmd == "help":
             _cmd_help()
         else:
