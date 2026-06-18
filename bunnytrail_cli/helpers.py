@@ -7,7 +7,7 @@ Markdown file with YAML frontmatter:
 
     content/<...path>/<slug>/index.md       — entity (frontmatter + prose)
     content/<...path>/<slug>/_collection.md — collection marker
-    content_meta/kinds/<...path>/<kind>/_kind.md — kind marker
+    content_meta/kinds/<...path>/<kind>/_kind.yaml — kind marker
 
 The legacy split layout (`index.yaml` + `index.md`) is no longer
 supported.
@@ -146,14 +146,14 @@ def is_entity_folder(path: Path) -> bool:
 def is_kind_folder(path: Path) -> bool:
     """A kind folder is identified by either:
 
-      - the presence of a ``_kind.md`` file (with or without
+      - the presence of a ``_kind.yaml`` file (with or without
         frontmatter — the folder existing is enough), or
       - simply being a sub-directory of ``content_meta/kinds/``.
 
     Callers that need to distinguish between "registered with a
-    `_kind.md`" and "implicit" should check for the file directly.
+    `_kind.yaml`" and "implicit" should check for the file directly.
     """
-    return (path / "_kind.md").is_file()
+    return (path / "_kind.yaml").is_file()
 
 
 def is_collection_folder(path: Path) -> bool:
@@ -202,8 +202,8 @@ def iter_entity_md_files(content: Path):
 
 
 def iter_kind_md_files(kinds: Path):
-    """Yield every ``_kind.md`` under the kinds tree."""
-    for md_file in kinds.rglob("_kind.md"):
+    """Yield every ``_kind.yaml`` under the kinds tree."""
+    for md_file in kinds.rglob("_kind.yaml"):
         yield md_file
 
 
@@ -229,7 +229,7 @@ def iter_link_consumer_files(project: Path):
     moved or renamed.
 
     Currently: entity ``index.md``, collection ``_collection.md``,
-    kind ``_kind.md``, and guide ``index.md``. Blog posts are
+    kind ``_kind.yaml``, and guide ``index.md``. Blog posts are
     deliberately excluded — wikilinks do not resolve in blog prose
     (see STRUCTURE.md).
     """
@@ -254,7 +254,7 @@ def page_id_for(md_file: Path, project: Path) -> str:
       (e.g. ``aurethia/places/bayurinda/sharazan``).
     - Collection ``_collection.md`` → folder path relative to
       ``content/`` (e.g. ``aurethia/places``).
-    - Kind ``_kind.md`` → ``kinds/<path>`` (e.g. ``kinds/being/mortal``).
+    - Kind ``_kind.yaml`` → ``kinds/<path>`` (e.g. ``kinds/being/mortal``).
     - Guide ``index.md`` → ``guides/<slug>`` (e.g. ``guides/cognita``).
     """
     content = content_root(project)
@@ -263,7 +263,7 @@ def page_id_for(md_file: Path, project: Path) -> str:
     folder = md_file.parent
     name = md_file.name
     try:
-        if name == "_kind.md" and kinds.is_dir():
+        if name == "_kind.yaml" and kinds.is_dir():
             return "kinds/" + str(folder.relative_to(kinds))
         if folder.parent == guides and name == "index.md":
             return "guides/" + folder.name
@@ -990,7 +990,8 @@ def collect_all_kinds(project: Path) -> list[tuple[str, str]]:
         slug = kind_dir.name
         target = f"kinds/{slug}"
         text = kind_md.read_text(encoding="utf-8")
-        fm_lines = frontmatter_lines(text)
+        # _kind.yaml is plain YAML (no frontmatter fences)
+        fm_lines = text.splitlines()
         singular = _parse_yaml_field(fm_lines, "singular")
         plural = _parse_yaml_field(fm_lines, "plural")
         if singular:
@@ -1710,6 +1711,43 @@ def _frontmatter_field_edits(
     return refs
 
 
+def _yaml_field_edits(
+    yaml_file: Path,
+    new_values: "dict[str, str]",
+    *,
+    current: "dict[str, str]",
+) -> "list[MoveRef]":
+    """Like :func:`_frontmatter_field_edits` but for plain YAML files
+    (``_kind.yaml``) that have no frontmatter fences.
+
+    Rewrites top-level ``field: value`` lines in the file.
+    """
+    refs: list[MoveRef] = []
+    try:
+        text = yaml_file.read_text(encoding="utf-8")
+    except OSError:
+        return refs
+    lines = text.splitlines()
+    for i, raw in enumerate(lines):
+        if not raw or raw[0] in (" ", "\t", "#"):
+            continue
+        key, _, rest = raw.partition(":")
+        key = key.strip()
+        if key not in new_values:
+            continue
+        new_val = new_values[key]
+        if not new_val:
+            continue
+        value = rest.strip().strip("\"'")
+        if value != current.get(key, ""):
+            continue
+        if value == new_val:
+            continue
+        new_line = f"{key}: {new_val}"
+        refs.append(MoveRef(yaml_file, i + 1, raw, new_line))
+    return refs
+
+
 
 # Rename reuses MoveRef for individual line edits; the plan shape is similar.
 
@@ -1743,11 +1781,12 @@ def read_entity_display_name(entity_dir: Path) -> str:
 
 
 def read_kind_display_names(kind_dir: Path) -> tuple[str, str]:
-    """Return ``(singular, plural)`` from ``_kind.md``, or ``("", "")``."""
-    md = kind_dir / "_kind.md"
+    """Return ``(singular, plural)`` from ``_kind.yaml``, or ``("", "")``."""
+    md = kind_dir / "_kind.yaml"
     if not md.is_file():
         return "", ""
-    lines = frontmatter_lines(md.read_text(encoding="utf-8"))
+    # _kind.yaml is plain YAML (no frontmatter fences)
+    lines = md.read_text(encoding="utf-8").splitlines()
     return _parse_yaml_field(lines, "singular"), _parse_yaml_field(lines, "plural")
 
 
@@ -1774,7 +1813,7 @@ def plan_rename(
     from its old value, the planner adds:
 
       * a frontmatter edit on the renamed thing's own ``index.md`` (or
-        ``_kind.md``) updating the scalar;
+        ``_kind.yaml``) updating the scalar;
       * label-text rewrites on every wikilink across the project whose
         target is the renamed thing AND whose label exactly equals the
         old display value.
@@ -1924,12 +1963,12 @@ def plan_rename(
                 if changed and new_line != line:
                     refs.append(MoveRef(md_file, i, line, new_line))
 
-        # Frontmatter edits on the renamed kind's own _kind.md.
+        # Frontmatter edits on the renamed kind's own _kind.yaml.
         if display_renames:
-            kind_md = old_dir / "_kind.md"
-            if kind_md.is_file():
-                fm_refs = _frontmatter_field_edits(
-                    kind_md,
+            kind_yaml = old_dir / "_kind.yaml"
+            if kind_yaml.is_file():
+                fm_refs = _yaml_field_edits(
+                    kind_yaml,
                     {"singular": new_display_names.get("singular", old_singular),
                      "plural": new_display_names.get("plural", old_plural)},
                     current={"singular": old_singular, "plural": old_plural},

@@ -297,7 +297,7 @@ def test_kind_rename_updates_own_frontmatter(project: Path) -> None:
         new_display_names={"singular": "person", "plural": "people"},
     )
     execute_rename(plan)
-    kind_md = project / "content_meta" / "kinds" / "being" / "person" / "_kind.md"
+    kind_md = project / "content_meta" / "kinds" / "being" / "person" / "_kind.yaml"
     text = kind_md.read_text(encoding="utf-8")
     assert "singular: person" in text
     assert "plural: people" in text
@@ -412,17 +412,23 @@ def _read_guide_body(project: Path, slug: str) -> str:
 
 
 def _write_kind_body(project: Path, kind_path: str, body: str) -> None:
-    md = project / "content_meta" / "kinds" / kind_path / "_kind.md"
+    md = project / "content_meta" / "kinds" / kind_path / "_kind.yaml"
     text = md.read_text(encoding="utf-8")
-    head, _, _ = text.partition("\n---\n")
-    md.write_text(head + "\n---\n" + body, encoding="utf-8")
+    # _kind.yaml is plain YAML; append body text after the YAML fields
+    md.write_text(text.rstrip("\n") + "\n" + body, encoding="utf-8")
 
 
 def _read_kind_body(project: Path, kind_path: str) -> str:
-    md = project / "content_meta" / "kinds" / kind_path / "_kind.md"
+    md = project / "content_meta" / "kinds" / kind_path / "_kind.yaml"
     text = md.read_text(encoding="utf-8")
-    _, _, body = text.partition("\n---\n")
-    return body
+    # Body starts after the last top-level YAML field line
+    lines = text.splitlines(keepends=True)
+    # Find where top-level key: value lines end
+    body_start = 0
+    for i, line in enumerate(lines):
+        if line and not line[0].isspace() and ":" in line and not line.startswith("#"):
+            body_start = i + 1
+    return "".join(lines[body_start:])
 
 
 def _write_collection_body(project: Path, collection_id: str, body: str) -> None:

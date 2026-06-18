@@ -14,7 +14,7 @@ Usage:
 
 All entities, collections, and kinds are authored as a single
 Markdown file with YAML frontmatter (``index.md``,
-``_collection.md``, ``_kind.md``). The CLI writes that shape; the
+``_collection.md``, ``_kind.yaml``). The CLI writes that shape; the
 legacy split layout (separate ``index.yaml`` + ``index.md``) is no
 longer supported.
 """
@@ -242,7 +242,7 @@ def add_collection(
 @click.argument("singular")
 @click.argument("plural", required=False, default="")
 @click.option("--description", default="", help="Short description of the kind.")
-@click.option("--force", is_flag=True, help="Overwrite existing _kind.md.")
+@click.option("--force", is_flag=True, help="Overwrite existing _kind.yaml.")
 @click.pass_context
 def add_kind(
     ctx: click.Context,
@@ -258,11 +258,11 @@ def add_kind(
     SINGULAR is the singular display name.
     PLURAL defaults to SINGULAR + 's' if omitted.
 
-    Writes a ``_kind.md`` with YAML frontmatter.
+    Writes a ``_kind.yaml`` plain YAML file.
     """
     root: Path = ctx.obj["root"]
     kind_dir = kinds_root(root) / path
-    md_file = kind_dir / "_kind.md"
+    md_file = kind_dir / "_kind.yaml"
 
     if md_file.exists() and not force:
         click.echo(
@@ -274,10 +274,10 @@ def add_kind(
     kind_dir.mkdir(parents=True, exist_ok=True)
 
     plural_val = plural or f"{singular}s"
-    fm_lines = [f"singular: {singular}", f"plural: {plural_val}"]
+    lines = [f"singular: {singular}", f"plural: {plural_val}"]
     if description:
-        fm_lines.append(f"description: {description}")
-    write_frontmatter_md(md_file, "\n".join(fm_lines))
+        lines.append(f"description: {description}")
+    md_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     click.echo(f"Created kind stub: {md_file.relative_to(root)}")
 
 
@@ -366,7 +366,7 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
                 new_display["name"] = new_name
     else:
         kind_dir = (cwd_kinds / old_path.rstrip("/")).resolve()
-        if kind_dir.is_dir() and (kind_dir / "_kind.md").is_file():
+        if kind_dir.is_dir() and (kind_dir / "_kind.yaml").is_file():
             old_singular, old_plural = read_kind_display_names(kind_dir)
             if old_singular:
                 ns = click.prompt(

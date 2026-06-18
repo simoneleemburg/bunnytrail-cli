@@ -143,7 +143,61 @@ def _path_completions(fragment: str, base: Path) -> list[tuple[str, str]]:
 
 def _all_kind_ids(kinds_base: Path) -> list[str]:
     """Return every kind folder name (leaf slug) found under *kinds_base*."""
-    return [p.parent.name for p in sorted(kinds_base.rglob("_kind.md"))]
+    return [p.parent.name for p in sorted(kinds_base.rglob("_kind.yaml"))]
+
+
+def _entity_parent_dirs_by_kind(
+    content: Path,
+    kind_id: str,
+    cwd: Path,
+) -> list[str]:
+    """
+    Return content-relative parent-directory strings for all existing entities
+    whose ``kind:`` field matches *kind_id*, ordered by proximity to *cwd*.
+
+    E.g. if cwd is ``content/aurethia/places`` and there are entities with
+    kind=planet in ``aurethia/places/celestial/`` and ``solara/places/``, you
+    get ``['aurethia/places/celestial', 'solara/places']``.
+    """
+    from .helpers import frontmatter_lines
+    from .helpers import _parse_yaml_field  # type: ignore[attr-defined]
+
+    seen: set[str] = set()
+    # Map (distance, rel_str) → rel_str for sorting
+    results: list[tuple[int, str]] = []
+
+    for index_md in content.rglob("index.md"):
+        entity_dir = index_md.parent
+        try:
+            fm = frontmatter_lines(index_md.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        entity_kind = _parse_yaml_field(fm, "kind")
+        if entity_kind != kind_id:
+            continue
+        parent = entity_dir.parent
+        try:
+            rel = str(parent.relative_to(content))
+        except ValueError:
+            continue
+        if rel in seen:
+            continue
+        seen.add(rel)
+        # Distance: count of path parts not shared with cwd
+        try:
+            cwd_rel = cwd.relative_to(content)
+            cwd_parts = cwd_rel.parts
+        except ValueError:
+            cwd_parts = ()
+        parent_parts = Path(rel).parts if rel != "." else ()
+        shared = sum(
+            1 for a, b in zip(cwd_parts, parent_parts) if a == b
+        )
+        distance = len(cwd_parts) + len(parent_parts) - 2 * shared
+        results.append((distance, rel))
+
+    results.sort(key=lambda t: t[0])
+    return [r for _, r in results]
 
 
 def _last_token_start(text: str) -> int:
@@ -235,6 +289,85 @@ class _MultiPathCompleter(Completer):
                 )
 
 
+class _KindSuggestedPathCompleter(Completer):
+    """
+    Completer for the ``add entity`` path prompt.
+
+    When the buffer is empty (or all-whitespace), surfaces suggested
+    parent directories in priority order:
+      1. Folders that already contain entities of *kind_id*, closest to
+         *cwd* first.
+      2. Any *recent_collections* added this session (content-relative).
+
+    Once the user starts typing, falls back to normal cwd-relative /
+    content-root path completion (same behaviour as _CwdPathCompleter).
+    """
+
+    def __init__(
+        self,
+        content: Path,
+        cwd: Path,
+        kind_id: str,
+        recent_collections: "Sequence[str]",
+    ) -> None:
+        self._content = content
+        self._cwd = cwd
+        self._kind_id = kind_id
+        self._recent_collections = list(recent_collections)
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        text = document.text_before_cursor
+
+        if not text.strip():
+            # ── Suggestion mode: show ranked candidates ──────────────────
+            seen: set[str] = set()
+
+            # 1. Folders with same-kind entities
+            for rel in _entity_parent_dirs_by_kind(
+                self._content, self._kind_id, self._cwd
+            ):
+                if rel in seen:
+                    continue
+                seen.add(rel)
+                display = rel + "/"
+                yield Completion(
+                    rel + "/",
+                    start_position=0,
+                    display=display,
+                )
+
+            # 2. Recently-added collections (content-relative paths)
+            for rel in self._recent_collections:
+                if rel in seen:
+                    continue
+                seen.add(rel)
+                yield Completion(
+                    rel + "/",
+                    start_position=0,
+                    display=rel + "/  [new]",
+                )
+            return
+
+        # ── Typing mode: normal path completion ──────────────────────────
+        if text.startswith("/"):
+            fragment = text[1:]
+            for replacement, display in _path_completions(fragment, self._content):
+                yield Completion(
+                    "/" + replacement,
+                    start_position=-len(text),
+                    display=display,
+                )
+        else:
+            for replacement, display in _path_completions(text, self._cwd):
+                yield Completion(
+                    replacement,
+                    start_position=-len(text),
+                    display=display,
+                )
+
+
 class _ShellCompleter(Completer):
     """
     Top-level completer for the main REPL prompt.  Parses the buffer to figure
@@ -289,12 +422,15 @@ class _ShellCompleter(Completer):
             if len(tokens) >= 2:
                 sub = tokens[1]
                 if sub == "entity":
+                    # new order: add entity <kind> <slug> <name> <path>
                     if len(tokens) == 3:
-                        yield from _yield_paths(fragment, self._content, frag_start)
-                    elif len(tokens) == 5:
+                        # arg 1: kind
                         yield from _yield_words(
                             _all_kind_ids(self._kinds), fragment, frag_start
                         )
+                    elif len(tokens) == 6:
+                        # arg 4: path (after kind, slug, name)
+                        yield from _yield_paths(fragment, self._content, frag_start)
                 elif sub == "collection":
                     if len(tokens) == 3:
                         yield from _yield_paths(fragment, self._content, frag_start)
@@ -456,48 +592,82 @@ def _slug_to_title(slug: str) -> str:
     return " ".join(w.capitalize() for w in slug.replace("_", "-").split("-") if w)
 
 
-def _cmd_add(project: Path, cwd: Path, args: list[str]) -> None:
+def _cmd_add(
+    project: Path,
+    cwd: Path,
+    args: list[str],
+    recent_collections: "list[str] | None" = None,
+) -> "str | None":
+    """
+    Handle the ``add`` command.
+
+    Returns the content-relative path of a newly created *collection* so the
+    caller can add it to the session's ``recent_collections`` list.  Returns
+    ``None`` for entities, kinds, or on failure/cancellation.
+    """
     content = content_root(project)
     kinds = kinds_root(project)
+    if recent_collections is None:
+        recent_collections = []
 
     if not args:
         sub = _ask("add what?", completer=ADD_SUBCOMMANDS)  # type: ignore[arg-type]
         if not sub:
-            return
+            return None
     else:
         sub = args[0]
 
     if sub not in ADD_SUBCOMMANDS:
         print(f"  unknown add subcommand: {sub!r}")
         print("  usage: add entity|collection|kind ...")
-        return
+        return None
 
     if sub == "entity":
-        path     = args[1] if len(args) > 1 else None
+        # New argument order: kind slug name path
+        # (kind first so path suggestions can be kind-aware)
+        kind_arg = args[1] if len(args) > 1 else None
         slug     = args[2] if len(args) > 2 else None
         name     = args[3] if len(args) > 3 else None
-        kind_arg = args[4] if len(args) > 4 else None
+        path     = args[4] if len(args) > 4 else None
 
-        if path is None:
-            path = _ask("path", complete_from_cwd=(cwd, content), default=".")
-            if path is None:
-                return
-
-        if slug is None:
-            slug = _ask("slug")
-            if not slug:
-                return
-
-        if name is None:
-            name = _ask("name", default=_slug_to_title(slug))
-            if not name:
-                return
-
+        # 1. Ask kind first
         if kind_arg is None:
             kind_ids = _all_kind_ids(kinds)
             kind_arg = _ask("kind", completer=kind_ids)  # type: ignore[arg-type]
             if not kind_arg:
-                return
+                return None
+        kind_id = kind_arg.split("/")[-1]
+
+        # 2. Ask path, with kind-aware suggestions
+        if path is None:
+            suggested = _entity_parent_dirs_by_kind(content, kind_id, cwd)
+            if suggested or recent_collections:
+                hint_parts = []
+                if suggested:
+                    hint_parts.append(f"{suggested[0]}/")
+                if recent_collections:
+                    hint_parts.append(f"{recent_collections[0]}/  [new]")
+                print(
+                    f"  (Tab to see suggested locations for '{kind_id}'"
+                    + (f"; top: {', '.join(hint_parts[:2])}" if hint_parts else "")
+                    + ")"
+                )
+            path_completer = _KindSuggestedPathCompleter(
+                content, cwd, kind_id, recent_collections
+            )
+            path = _ask("path", completer=path_completer, default=".")
+            if path is None:
+                return None
+
+        if slug is None:
+            slug = _ask("slug")
+            if not slug:
+                return None
+
+        if name is None:
+            name = _ask("name", default=_slug_to_title(slug))
+            if not name:
+                return None
 
         # Resolve path: leading '/' means relative to content root, else relative to cwd
         path = path.rstrip("/")
@@ -506,21 +676,27 @@ def _cmd_add(project: Path, cwd: Path, args: list[str]) -> None:
         elif path in ("", "."):
             base_dir = cwd
         else:
-            base_dir = cwd / path
+            # Could be content-relative (from a suggestion) or cwd-relative
+            content_abs = (content / path).resolve()
+            cwd_abs = (cwd / path).resolve()
+            if content_abs.exists() or not cwd_abs.exists():
+                # Prefer content-relative when it resolves or neither resolves
+                base_dir = content_abs
+            else:
+                base_dir = cwd_abs
         entity_dir = base_dir / slug.rstrip("/")
         md_file = entity_dir / "index.md"
         if md_file.exists():
             print(f"  already exists: {md_file.relative_to(project)}")
-            return
+            return None
 
-        kind_id = kind_arg.split("/")[-1]
         if not any(kinds.rglob(kind_id)):
             print(f"  warning: no kind '{kind_id}' found under content_meta/kinds/")
 
         entity_dir.mkdir(parents=True, exist_ok=True)
         write_frontmatter_md(md_file, f"name: {name}\nkind: {kind_id}")
         print(f"  created {md_file.relative_to(project)}")
-        return
+        return None
 
     if sub == "collection":
         slug  = args[1] if len(args) > 1 else None
@@ -529,22 +705,26 @@ def _cmd_add(project: Path, cwd: Path, args: list[str]) -> None:
         if slug is None:
             slug = _ask("slug")
             if not slug:
-                return
+                return None
 
         if title is None:
             title = _ask("title", default=_slug_to_title(slug))
             if not title:
-                return
+                return None
 
         coll_dir = cwd / slug.rstrip("/")
         md_file = coll_dir / "_collection.md"
         if md_file.exists():
             print(f"  already exists: {md_file.relative_to(project)}")
-            return
+            return None
         coll_dir.mkdir(parents=True, exist_ok=True)
         write_frontmatter_md(md_file, f"title: {title}")
         print(f"  created {md_file.relative_to(project)}")
-        return
+        # Return the content-relative path so the REPL can track it
+        try:
+            return str(coll_dir.relative_to(content))
+        except ValueError:
+            return None
 
     if sub == "kind":
         # path is relative to kinds root, e.g. "celestial/planet"
@@ -570,12 +750,12 @@ def _cmd_add(project: Path, cwd: Path, args: list[str]) -> None:
                 plural = f"{singular}s"
 
         kind_dir = kinds / path.rstrip("/")
-        md_file = kind_dir / "_kind.md"
+        md_file = kind_dir / "_kind.yaml"
         if md_file.exists():
             print(f"  already exists: {md_file.relative_to(project)}")
             return
         kind_dir.mkdir(parents=True, exist_ok=True)
-        write_frontmatter_md(md_file, f"singular: {singular}\nplural: {plural}")
+        md_file.write_text(f"singular: {singular}\nplural: {plural}\n", encoding="utf-8")
         print(f"  created {md_file.relative_to(project)}")
         return
 
@@ -723,7 +903,7 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
                 new_display["name"] = answer
     else:
         kind_dir = kinds / old_path
-        if kind_dir.is_dir() and (kind_dir / "_kind.md").is_file():
+        if kind_dir.is_dir() and (kind_dir / "_kind.yaml").is_file():
             old_singular, old_plural = read_kind_display_names(kind_dir)
             if old_singular:
                 answer = _ask("new singular", default=old_singular)
@@ -925,7 +1105,7 @@ def _cmd_help() -> None:
   cd ..                                 go up one level
   cd                                    go back to content root
   tree [path]                           show subtree from current dir (or path)
-  add entity <path> <slug> [name] [kind]       create entity stub under path
+  add entity <kind> <slug> [name] [path]       create entity stub (kind first, then place it)
   add collection <slug> [title]         create collection folder under cwd
   add kind <kinds-path> [singular] [plural]  create kind stub
   move <entity-path> <new-parent>       move entity and rewrite all references
@@ -948,6 +1128,7 @@ def _cmd_help() -> None:
 def run_shell(project: Path) -> None:
     content = content_root(project)
     cwd = content
+    recent_collections: list[str] = []  # content-relative paths, newest last
 
     shell_completer = _ShellCompleter(project)
     history = FileHistory(str(HISTORY_FILE))
@@ -1005,7 +1186,9 @@ def run_shell(project: Path) -> None:
         elif cmd == "cd":
             cwd = _cmd_cd(cwd, content, args)
         elif cmd == "add":
-            _cmd_add(project, cwd, args)
+            new_coll = _cmd_add(project, cwd, args, recent_collections)
+            if new_coll and new_coll not in recent_collections:
+                recent_collections.append(new_coll)
         elif cmd == "move":
             _cmd_move(project, cwd, content, args)
         elif cmd == "rename":

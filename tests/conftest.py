@@ -98,12 +98,12 @@ def project(tmp_path: Path) -> Path:
     # Kinds
     (meta / "kinds" / "place").mkdir(parents=True)
     (meta / "kinds" / "being" / "human").mkdir(parents=True)
-    # The 'human' kind has a _kind.md so crosslink can match its display
+    # The 'human' kind has a _kind.yaml so crosslink can match its display
     # names; 'place' and 'being' exist only as folders (folder-existence
     # is enough to register the id, per STRUCTURE.md).
     _write(
-        meta / "kinds" / "being" / "human" / "_kind.md",
-        "---\nsingular: human\nplural: humans\n---\n",
+        meta / "kinds" / "being" / "human" / "_kind.yaml",
+        "singular: human\nplural: humans\n",
     )
 
     # A guide that mentions several entities by display name so we

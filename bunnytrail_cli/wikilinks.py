@@ -197,7 +197,7 @@ def build_index(project: Path) -> WikilinkIndex:
     kind_ids: set[str] = set()
     if kinds.is_dir():
         # Every directory under kinds_root is a registered kind id
-        # (its leaf slug). The folder existing is enough — _kind.md
+        # (its leaf slug). The folder existing is enough — _kind.yaml
         # is optional per STRUCTURE.md.
         for child in kinds.rglob("*"):
             if child.is_dir() and not child.name.startswith("."):
