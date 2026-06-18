@@ -28,6 +28,23 @@ def _write_body(project: Path, entity_id: str, body: str) -> None:
     md.write_text(head + "\n---\n" + body, encoding="utf-8")
 
 
+def _set_frontmatter(project: Path, entity_id: str, frontmatter: str) -> None:
+    """Overwrite an entity's index.md with the given frontmatter (no fences needed)
+    and an empty body.  *frontmatter* should be raw YAML lines, e.g.
+    ``"name: Foo\\nkind: place\\nclass: aurethia/nature/species/shar"``."""
+    md = project / "content" / entity_id / "index.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(f"---\n{frontmatter.strip()}\n---\n", encoding="utf-8")
+
+
+def _read_frontmatter(project: Path, entity_id: str) -> str:
+    """Return the raw frontmatter content (between the --- fences) as a string."""
+    md = project / "content" / entity_id / "index.md"
+    text = md.read_text(encoding="utf-8")
+    _, fm, _ = text.split("---", 2)
+    return fm
+
+
 def _read_body(project: Path, entity_id: str) -> str:
     md = project / "content" / entity_id / "index.md"
     text = md.read_text(encoding="utf-8")
@@ -508,3 +525,157 @@ def test_entity_move_updates_guide_body(project: Path) -> None:
     execute_move(plan)
     body = _read_guide_body(project, "cognita")
     assert "aurethia/people/sharazan" in body, body
+
+
+# ---------------------------------------------------------------------------
+# Extra entity-path frontmatter fields: class, role, within, species
+# ---------------------------------------------------------------------------
+
+def test_rename_rewrites_class_field(project: Path) -> None:
+    """``class: <entity-path>`` in index.md frontmatter is rewritten on rename."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        "name: Duskmere\nkind: being\nclass: aurethia/places/sharazan",
+    )
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    assert "class: aurethia/places/sharazan-new" in fm, fm
+    assert "class: aurethia/places/sharazan\n" not in fm, fm
+
+
+def test_move_rewrites_class_field(project: Path) -> None:
+    """``class:`` is rewritten when the referenced entity is moved."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        "name: Duskmere\nkind: being\nclass: aurethia/places/sharazan",
+    )
+    plan = plan_move(project, "aurethia/places/sharazan", "earth/places")
+    assert plan.error == ""
+    execute_move(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    assert "class: earth/places/sharazan" in fm, fm
+
+
+def test_rename_rewrites_role_in_relation(project: Path) -> None:
+    """``role: <entity-path>`` inside a relations list item is rewritten on rename."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        (
+            "name: Duskmere\nkind: being\n"
+            "relations:\n"
+            "  - kind: member-of\n"
+            "    target: aurethia/places/bayurinda\n"
+            "    role: aurethia/places/sharazan\n"
+        ),
+    )
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    assert "role: aurethia/places/sharazan-new" in fm, fm
+    assert "role: aurethia/places/sharazan\n" not in fm, fm
+
+
+def test_rename_rewrites_statistics_within(project: Path) -> None:
+    """``within: <entity-path>`` inside statistics.population is rewritten on rename."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        (
+            "name: Duskmere\nkind: cultural-group\n"
+            "statistics:\n"
+            "  - population:\n"
+            "    - total: 100\n"
+            "    - within: aurethia/places/sharazan\n"
+            "    - slices:\n"
+            "      - species: foundation/concepts/harmonia\n"
+            "        percentage: 100\n"
+        ),
+    )
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    assert "within: aurethia/places/sharazan-new" in fm, fm
+    assert "within: aurethia/places/sharazan\n" not in fm, fm
+
+
+def test_rename_rewrites_statistics_species(project: Path) -> None:
+    """``species: <entity-path>`` inside statistics slices is rewritten on rename."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        (
+            "name: Duskmere\nkind: cultural-group\n"
+            "statistics:\n"
+            "  - population:\n"
+            "    - total: 50\n"
+            "    - slices:\n"
+            "      - species: aurethia/places/sharazan\n"
+            "        percentage: 100\n"
+        ),
+    )
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    assert "species: aurethia/places/sharazan-new" in fm, fm
+    assert "species: aurethia/places/sharazan\n" not in fm, fm
+
+
+def test_move_rewrites_statistics_species(project: Path) -> None:
+    """``species:`` is rewritten when the referenced entity is moved."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        (
+            "name: Duskmere\nkind: cultural-group\n"
+            "statistics:\n"
+            "  - population:\n"
+            "    - total: 50\n"
+            "    - slices:\n"
+            "      - species: aurethia/places/sharazan\n"
+            "        percentage: 100\n"
+        ),
+    )
+    plan = plan_move(project, "aurethia/places/sharazan", "earth/places")
+    assert plan.error == ""
+    execute_move(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    assert "species: earth/places/sharazan" in fm, fm
+
+
+def test_rename_does_not_rewrite_partial_path_in_class(project: Path) -> None:
+    """A ``class:`` that only starts with the old id (partial match) is NOT rewritten."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        "name: Duskmere\nkind: being\nclass: aurethia/places/sharazan-extended",
+    )
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    # Must NOT be changed — it's a different entity
+    assert "class: aurethia/places/sharazan-extended" in fm, fm
+
+
+def test_rename_rewrites_multiple_path_fields_in_one_entity(project: Path) -> None:
+    """When multiple path fields in the same entity point to the renamed entity,
+    all of them are rewritten."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        (
+            "name: Duskmere\nkind: being\n"
+            "class: aurethia/places/sharazan\n"
+            "relations:\n"
+            "  - kind: located-in\n"
+            "    target: aurethia/places/sharazan\n"
+            "    role: aurethia/places/sharazan\n"
+        ),
+    )
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    assert "class: aurethia/places/sharazan-new" in fm, fm
+    assert "target: aurethia/places/sharazan-new" in fm, fm
+    assert "role: aurethia/places/sharazan-new" in fm, fm

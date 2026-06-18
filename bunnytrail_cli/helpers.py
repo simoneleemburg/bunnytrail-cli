@@ -355,6 +355,9 @@ def _scan_entity_refs(
     References are looked for in:
       * ``target: <old-id>`` lines in any entity's ``index.md``
         frontmatter.
+      * ``class: <old-id>`` (top-level), ``role: <old-id>``,
+        ``within: <old-id>``, and ``species: <old-id>`` lines
+        (the last three may be indented) in entity frontmatter.
       * ``[[<link>]]`` tokens that resolve to *old_id* in any
         entity's ``index.md`` body, **scoped to the rendering page's
         cluster**.
@@ -383,7 +386,18 @@ def _scan_entity_refs(
     post_index = index.with_renamed_ids({old_id: new_id})
 
     target_re = re.compile(
-        r"^(?P<prefix>\s*target:\s*)(?P<id>" + re.escape(old_id) + r")(?P<suffix>.*)$"
+        r"^(?P<prefix>\s*(?:-\s+)?target:\s*)(?P<id>" + re.escape(old_id) + r")(?P<suffix>\s*.*)$"
+    )
+    # Other frontmatter fields that store entity paths.
+    # ``class:`` is always top-level; ``role:``, ``within:``, ``species:``
+    # may appear as YAML list items, so the prefix may include ``- ``.
+    # The path must be followed by end-of-line or whitespace (to avoid
+    # matching a longer sibling path like aurethia/places/sharazan-extended).
+    _path_fields = "|".join(re.escape(f) for f in ("class", "role", "within", "species"))
+    extra_path_re = re.compile(
+        r"^(?P<prefix>\s*(?:-\s+)?(?:" + _path_fields + r"):\s*)"
+        r"(?P<id>" + re.escape(old_id) + r")"
+        r"(?P<suffix>(?:\s+.*)?)$"
     )
 
     for md_file in iter_link_consumer_files(project):
@@ -410,6 +424,11 @@ def _scan_entity_refs(
                     if m:
                         new_line = m.group("prefix") + new_id + m.group("suffix")
                         refs.append(MoveRef(md_file, i, line, new_line))
+                    else:
+                        m = extra_path_re.match(line)
+                        if m:
+                            new_line = m.group("prefix") + new_id + m.group("suffix")
+                            refs.append(MoveRef(md_file, i, line, new_line))
                 continue
 
             new_line, rewrote, warns = _rewrite_wikilinks_on_line(
