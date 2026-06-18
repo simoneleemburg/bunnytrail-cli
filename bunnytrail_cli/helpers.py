@@ -864,6 +864,11 @@ def execute_move(plan: MovePlan) -> None:
 #                are surfaced after a run so the user can decide whether
 #                to demote them to `never:`.
 #
+#   add:         Behaviour of the `bt add` command.
+#     class_for_kinds:
+#                Flat list of kind slugs for which `bt add entity` will
+#                interactively prompt for a ``class:`` entity-path field.
+#
 # Both crosslink lists are matched case-sensitively against the same
 # strings the crosslinker would otherwise turn into wikilinks (a kind's
 # singular/plural, or an entity's display name).
@@ -877,65 +882,95 @@ class CrosslinkConfig:
     warn: set[str] = field(default_factory=set)
 
 
-def load_crosslink_config(project: Path) -> CrosslinkConfig:
-    """Load the ``crosslink:`` section from ``content_meta/bt.yml`` (if present).
+@dataclass
+class AddConfig:
+    """Parsed ``add:`` section of ``content_meta/bt.yml``."""
+    class_for_kinds: set[str] = field(default_factory=set)
 
-    Missing file → empty config (no filters, no warnings).  Parsing is
-    deliberately lenient: only the ``crosslink:`` top-level key is read,
-    and within it only ``never:`` and ``warn:`` flat lists of YAML scalars.
-    Other keys, comments and blank lines are ignored.  Unknown YAML
-    (mappings under these keys, anchors, etc.) is rejected silently —
-    keep the file simple.
+
+@dataclass
+class BtConfig:
+    """Full parsed contents of ``content_meta/bt.yml``."""
+    crosslink: CrosslinkConfig = field(default_factory=CrosslinkConfig)
+    add: AddConfig = field(default_factory=AddConfig)
+
+
+def load_bt_config(project: Path) -> BtConfig:
+    """Load ``content_meta/bt.yml`` (if present) and return a :class:`BtConfig`.
+
+    Missing file → empty config with all defaults.  Parsing is deliberately
+    lenient: only recognised keys are read; unknown keys and invalid shapes
+    are silently skipped — keep the file simple.
     """
     cfg_file = project / _BT_CONFIG_PATH
     if not cfg_file.is_file():
-        return CrosslinkConfig()
+        return BtConfig()
 
     text = cfg_file.read_text(encoding="utf-8")
-    never: set[str] = set()
-    warn: set[str] = set()
-    in_crosslink_section = False
-    current: "set[str] | None" = None
+
+    cl_never: set[str] = set()
+    cl_warn: set[str] = set()
+    add_class_for_kinds: set[str] = set()
+
+    # Simple single-pass line parser.
+    # State: which top-level section and which sub-key we are inside.
+    section: "str | None" = None          # "crosslink" | "add" | None
+    sub_key: "str | None" = None          # e.g. "never", "warn", "class_for_kinds"
 
     for raw in text.splitlines():
         line = raw.rstrip()
         if not line or line.lstrip().startswith("#"):
             continue
-        # Top-level key (no leading whitespace)
-        if line[0] not in (" ", "\t"):
-            key, _, _rest = line.partition(":")
-            key = key.strip()
-            if key == "crosslink":
-                in_crosslink_section = True
-                current = None
-            else:
-                in_crosslink_section = False
-                current = None
-            continue
-        # Indented key inside the crosslink section
-        if in_crosslink_section and line[0] in (" ", "\t"):
-            stripped = line.strip()
-            if not stripped.startswith("- "):
-                # Sub-key of crosslink:
-                key, _, _rest = stripped.partition(":")
-                key = key.strip()
-                if key == "never":
-                    current = never
-                elif key == "warn":
-                    current = warn
-                else:
-                    current = None
-                continue
-        # List item under the current crosslink sub-key
-        if current is None:
-            continue
-        stripped = line.strip()
-        if stripped.startswith("- "):
-            value = stripped[2:].strip().strip("\"'")
-            if value:
-                current.add(value)
 
-    return CrosslinkConfig(never=never, warn=warn)
+        # Top-level key — no leading whitespace
+        if line[0] not in (" ", "\t"):
+            key, _, _ = line.partition(":")
+            key = key.strip()
+            section = key if key in ("crosslink", "add") else None
+            sub_key = None
+            continue
+
+        # Indented content — must be inside a recognised section
+        if section is None:
+            continue
+
+        stripped = line.strip()
+
+        # Sub-key line (not a list item)
+        if not stripped.startswith("- "):
+            key, _, _ = stripped.partition(":")
+            key = key.strip()
+            if section == "crosslink" and key in ("never", "warn"):
+                sub_key = key
+            elif section == "add" and key == "class_for_kinds":
+                sub_key = key
+            else:
+                sub_key = None
+            continue
+
+        # List item — accumulate into the current sub-key's collection
+        if sub_key is None:
+            continue
+        value = stripped[2:].strip().strip("\"'")
+        if not value:
+            continue
+        if section == "crosslink":
+            if sub_key == "never":
+                cl_never.add(value)
+            elif sub_key == "warn":
+                cl_warn.add(value)
+        elif section == "add" and sub_key == "class_for_kinds":
+            add_class_for_kinds.add(value)
+
+    return BtConfig(
+        crosslink=CrosslinkConfig(never=cl_never, warn=cl_warn),
+        add=AddConfig(class_for_kinds=add_class_for_kinds),
+    )
+
+
+def load_crosslink_config(project: Path) -> CrosslinkConfig:
+    """Convenience shim — returns the crosslink section of :func:`load_bt_config`."""
+    return load_bt_config(project).crosslink
 
 
 @dataclass

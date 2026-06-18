@@ -34,6 +34,7 @@ from .helpers import (
     kinds_root,
     list_kinds_tree,
     list_tree,
+    load_bt_config,
     plan_crosslink,
     plan_crosslink_folder,
     plan_move,
@@ -671,6 +672,16 @@ def _cmd_add(
 
         summary = _ask("summary (optional)")  # empty → omitted
 
+        # Ask for class: if this kind is configured to require one
+        entity_class: "str | None" = None
+        bt_cfg = load_bt_config(project)
+        if kind_id in bt_cfg.add.class_for_kinds:
+            entity_class = _ask(
+                "class",
+                complete_from_cwd=(cwd, content),
+            )
+            # empty answer → skip the field silently
+
         # Resolve path: leading '/' means relative to content root, else relative to cwd
         path = path.rstrip("/")
         if path.startswith("/"):
@@ -697,6 +708,10 @@ def _cmd_add(
 
         entity_dir.mkdir(parents=True, exist_ok=True)
         fm = f"name: {name}\nkind: {kind_id}"
+        if entity_class:
+            # Normalise: strip leading slash and trailing slash
+            entity_class = entity_class.strip("/")
+            fm += f"\nclass: {entity_class}"
         if summary:
             fm += f"\nsummary: {summary}"
         write_frontmatter_md(md_file, fm)
