@@ -850,43 +850,51 @@ def execute_move(plan: MovePlan) -> None:
 # Crosslink — insert wikilinks into an article's prose
 # ---------------------------------------------------------------------------
 
-# Path to the optional crosslink-policy config file, relative to a
-# project root.  Two top-level keys are recognised:
+# ---------------------------------------------------------------------------
+# bt.yml — project-level CLI config
+# ---------------------------------------------------------------------------
+
+# Path to the optional bt CLI config file, relative to a project root.
+# Currently recognised top-level keys:
 #
-#   never:  list of exact display names that must never be auto-linked.
-#   warn:   list of exact display names that may be linked, but should be
-#           surfaced after a run so the user can decide whether to demote
-#           them to `never:`.
+#   crosslink:   Policy for the `bt crosslink` command.
+#     never:     Flat list of exact display names that must never be
+#                auto-linked.
+#     warn:      Flat list of exact display names that may be linked but
+#                are surfaced after a run so the user can decide whether
+#                to demote them to `never:`.
 #
-# Both lists are matched case-sensitively against the same strings the
-# crosslinker would otherwise turn into wikilinks (a kind's singular/
-# plural, or an entity's display name).
-_CROSSLINK_CONFIG_PATH = "content_meta/crosslink.yml"
+# Both crosslink lists are matched case-sensitively against the same
+# strings the crosslinker would otherwise turn into wikilinks (a kind's
+# singular/plural, or an entity's display name).
+_BT_CONFIG_PATH = "content_meta/bt.yml"
 
 
 @dataclass
 class CrosslinkConfig:
-    """Parsed contents of ``content_meta/crosslink.yml``."""
+    """Parsed ``crosslink:`` section of ``content_meta/bt.yml``."""
     never: set[str] = field(default_factory=set)
     warn: set[str] = field(default_factory=set)
 
 
 def load_crosslink_config(project: Path) -> CrosslinkConfig:
-    """Load ``content_meta/crosslink.yml`` (if present).
+    """Load the ``crosslink:`` section from ``content_meta/bt.yml`` (if present).
 
     Missing file → empty config (no filters, no warnings).  Parsing is
-    deliberately lenient: only ``never:`` and ``warn:`` are read, and
-    each must be a flat list of YAML scalars.  Other keys, comments
-    and blank lines are ignored.  Unknown YAML (mappings under these
-    keys, anchors, etc.) is rejected silently — keep the file simple.
+    deliberately lenient: only the ``crosslink:`` top-level key is read,
+    and within it only ``never:`` and ``warn:`` flat lists of YAML scalars.
+    Other keys, comments and blank lines are ignored.  Unknown YAML
+    (mappings under these keys, anchors, etc.) is rejected silently —
+    keep the file simple.
     """
-    cfg_file = (project / _CROSSLINK_CONFIG_PATH)
+    cfg_file = project / _BT_CONFIG_PATH
     if not cfg_file.is_file():
         return CrosslinkConfig()
 
     text = cfg_file.read_text(encoding="utf-8")
     never: set[str] = set()
     warn: set[str] = set()
+    in_crosslink_section = False
     current: "set[str] | None" = None
 
     for raw in text.splitlines():
@@ -897,14 +905,28 @@ def load_crosslink_config(project: Path) -> CrosslinkConfig:
         if line[0] not in (" ", "\t"):
             key, _, _rest = line.partition(":")
             key = key.strip()
-            if key == "never":
-                current = never
-            elif key == "warn":
-                current = warn
+            if key == "crosslink":
+                in_crosslink_section = True
+                current = None
             else:
+                in_crosslink_section = False
                 current = None
             continue
-        # List item under the current key
+        # Indented key inside the crosslink section
+        if in_crosslink_section and line[0] in (" ", "\t"):
+            stripped = line.strip()
+            if not stripped.startswith("- "):
+                # Sub-key of crosslink:
+                key, _, _rest = stripped.partition(":")
+                key = key.strip()
+                if key == "never":
+                    current = never
+                elif key == "warn":
+                    current = warn
+                else:
+                    current = None
+                continue
+        # List item under the current crosslink sub-key
         if current is None:
             continue
         stripped = line.strip()

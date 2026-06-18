@@ -669,6 +669,8 @@ def _cmd_add(
             if not name:
                 return None
 
+        summary = _ask("summary (optional)")  # empty → omitted
+
         # Resolve path: leading '/' means relative to content root, else relative to cwd
         path = path.rstrip("/")
         if path.startswith("/"):
@@ -694,7 +696,10 @@ def _cmd_add(
             print(f"  warning: no kind '{kind_id}' found under content_meta/kinds/")
 
         entity_dir.mkdir(parents=True, exist_ok=True)
-        write_frontmatter_md(md_file, f"name: {name}\nkind: {kind_id}")
+        fm = f"name: {name}\nkind: {kind_id}"
+        if summary:
+            fm += f"\nsummary: {summary}"
+        write_frontmatter_md(md_file, fm)
         print(f"  created {md_file.relative_to(project)}")
         return None
 
@@ -712,13 +717,18 @@ def _cmd_add(
             if not title:
                 return None
 
+        description = _ask("description (optional)")  # empty → omitted
+
         coll_dir = cwd / slug.rstrip("/")
         md_file = coll_dir / "_collection.md"
         if md_file.exists():
             print(f"  already exists: {md_file.relative_to(project)}")
             return None
         coll_dir.mkdir(parents=True, exist_ok=True)
-        write_frontmatter_md(md_file, f"title: {title}")
+        fm = f"title: {title}"
+        if description:
+            fm += f"\ndescription: {description}"
+        write_frontmatter_md(md_file, fm)
         print(f"  created {md_file.relative_to(project)}")
         # Return the content-relative path so the REPL can track it
         try:
@@ -1087,7 +1097,7 @@ def _print_crosslink_warnings(plans) -> None:
                 )
     if not by_term:
         return
-    print("\n  Warnings (terms flagged in content_meta/crosslink.yml `warn:`):")
+    print("\n  Warnings (terms flagged in content_meta/bt.yml `crosslink.warn`):")
     for term in sorted(by_term):
         print(f"    '{term}' linked in:")
         for article_id, md_name, line_no in by_term[term]:

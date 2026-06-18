@@ -203,10 +203,16 @@ def test_crosslink_simplification_leaves_unresolvable_links_alone(
 # Heading skip + crosslink policy config
 # ---------------------------------------------------------------------------
 
-def _write_crosslink_yml(project: Path, body: str) -> None:
-    cfg = project / "content_meta" / "crosslink.yml"
+def _write_crosslink_yml(project: Path, crosslink_body: str) -> None:
+    """Write a bt.yml with the given text nested under a ``crosslink:`` key."""
+    cfg = project / "content_meta" / "bt.yml"
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(body, encoding="utf-8")
+    # Indent the caller's content by two spaces so it sits under `crosslink:`
+    indented = "\n".join(
+        ("  " + line) if line.strip() else line
+        for line in crosslink_body.splitlines()
+    )
+    cfg.write_text(f"crosslink:\n{indented}\n", encoding="utf-8")
 
 
 def test_crosslink_skips_headings(project: Path) -> None:

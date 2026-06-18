@@ -654,7 +654,7 @@ def _print_crosslink_warnings(plans) -> None:
                 )
     if not by_term:
         return
-    click.echo("\nWarnings (terms flagged in content_meta/crosslink.yml `warn:`):")
+        click.echo("\nWarnings (terms flagged in content_meta/bt.yml `crosslink.warn`):")
     for term in sorted(by_term):
         click.echo(f"  '{term}' linked in:")
         for article_id, md_name, line_no in by_term[term]:
