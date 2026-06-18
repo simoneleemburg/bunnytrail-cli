@@ -78,10 +78,11 @@ _RESET  = "\033[0m"
 
 def _make_tab_bindings() -> KeyBindings:
     """
-    Custom Tab behaviour:
-      - No menu open  → open menu with first item pre-selected.
-      - Menu open, item highlighted → apply that completion and close the menu.
-      - Menu open, nothing highlighted yet → highlight the first item.
+    Custom key bindings:
+      Tab  — no menu open: open with first item pre-selected.
+             item highlighted: accept it and close the menu.
+             menu open, nothing selected: highlight first item.
+      Escape — cancel current prompt (same as Ctrl-C).
     """
     kb = KeyBindings()
 
@@ -91,15 +92,16 @@ def _make_tab_bindings() -> KeyBindings:
         state = buff.complete_state
 
         if state is None:
-            # No menu — open it and pre-select the first item.
             buff.start_completion(select_first=True)
         elif state.current_completion is not None:
-            # An item is highlighted — accept it and close the menu.
             buff.apply_completion(state.current_completion)
             buff.cancel_completion()
         else:
-            # Menu is open but nothing highlighted — move to first item.
             buff.complete_next()
+
+    @kb.add("escape")
+    def _escape(event) -> None:
+        event.app.exit(exception=KeyboardInterrupt())
 
     return kb
 
@@ -176,6 +178,38 @@ class _PathCompleter(Completer):
                 start_position=-len(text),
                 display=display,
             )
+
+
+class _CwdPathCompleter(Completer):
+    """
+    Completes paths relative to *cwd* by default.
+    If the user types a leading '/', switches to completing from *root*
+    (stripping the leading slash so the fragment matches root-relative paths).
+    """
+
+    def __init__(self, cwd: Path, root: Path) -> None:
+        self._cwd = cwd
+        self._root = root
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        text = document.text_before_cursor
+        if text.startswith("/"):
+            fragment = text[1:]  # strip leading /
+            for replacement, display in _path_completions(fragment, self._root):
+                yield Completion(
+                    "/" + replacement,
+                    start_position=-len(text),
+                    display=display,
+                )
+        else:
+            for replacement, display in _path_completions(text, self._cwd):
+                yield Completion(
+                    replacement,
+                    start_position=-len(text),
+                    display=display,
+                )
 
 
 class _MultiPathCompleter(Completer):
@@ -315,20 +349,25 @@ def _ask(
     label: str,
     completer: Optional[object] = None,
     complete_from: Optional[Path] = None,
+    complete_from_cwd: Optional[tuple[Path, Path]] = None,
     complete_kinds: bool = False,
     default: str = "",
 ) -> Optional[str]:
     """
     Prompt for a single value with optional completion.
 
-    *complete_from* — if set, Tab completes paths under this directory.
-    *completer*     — if provided as a list of strings, completes against that list.
-                      If a Completer instance, used directly.
+    *complete_from*     — Tab completes paths under this fixed directory.
+    *complete_from_cwd* — (cwd, root) pair: completes relative to cwd by
+                          default; if the user types a leading '/', completes
+                          from root instead.
+    *completer*         — list of strings or a Completer instance.
     """
     hint = f" [{default}]" if default else ""
 
     pt_completer: Optional[Completer] = None
-    if complete_from is not None:
+    if complete_from_cwd is not None:
+        pt_completer = _CwdPathCompleter(*complete_from_cwd)
+    elif complete_from is not None:
         pt_completer = _PathCompleter(complete_from)
     elif isinstance(completer, Completer):
         pt_completer = completer
@@ -412,6 +451,11 @@ def _cmd_cd(cwd: Path, content: Path, args: list[str]) -> Path:
     return candidate.resolve()
 
 
+def _slug_to_title(slug: str) -> str:
+    """Convert a slug like 'solar-system' or 'dark_forest' to 'Solar System'."""
+    return " ".join(w.capitalize() for w in slug.replace("_", "-").split("-") if w)
+
+
 def _cmd_add(project: Path, cwd: Path, args: list[str]) -> None:
     content = content_root(project)
     kinds = kinds_root(project)
@@ -429,21 +473,23 @@ def _cmd_add(project: Path, cwd: Path, args: list[str]) -> None:
         return
 
     if sub == "entity":
-        path = args[1] if len(args) > 1 else None
-        name = args[2] if len(args) > 2 else None
-        kind_arg = args[3] if len(args) > 3 else None
+        path     = args[1] if len(args) > 1 else None
+        slug     = args[2] if len(args) > 2 else None
+        name     = args[3] if len(args) > 3 else None
+        kind_arg = args[4] if len(args) > 4 else None
 
         if path is None:
-            try:
-                default_path = str(cwd.relative_to(content))
-            except ValueError:
-                default_path = ""
-            path = _ask("path", complete_from=content, default=default_path)
+            path = _ask("path", complete_from_cwd=(cwd, content), default=".")
             if path is None:
                 return
 
+        if slug is None:
+            slug = _ask("slug")
+            if not slug:
+                return
+
         if name is None:
-            name = _ask("name")
+            name = _ask("name", default=_slug_to_title(slug))
             if not name:
                 return
 
@@ -453,17 +499,15 @@ def _cmd_add(project: Path, cwd: Path, args: list[str]) -> None:
             if not kind_arg:
                 return
 
+        # Resolve path: leading '/' means relative to content root, else relative to cwd
         path = path.rstrip("/")
-        if path == ".":
-            entity_slug = name.lower().replace(" ", "-")
-            entity_dir = cwd / entity_slug
+        if path.startswith("/"):
+            base_dir = content / path.lstrip("/")
+        elif path in ("", "."):
+            base_dir = cwd
         else:
-            raw_dir = (cwd / path) if (cwd / path).is_dir() or not (content / path).is_dir() else (content / path)
-            if not raw_dir.is_relative_to(content):
-                raw_dir = content / path
-            entity_slug = name.lower().replace(" ", "-")
-            entity_dir = raw_dir / entity_slug
-
+            base_dir = cwd / path
+        entity_dir = base_dir / slug.rstrip("/")
         md_file = entity_dir / "index.md"
         if md_file.exists():
             print(f"  already exists: {md_file.relative_to(project)}")
@@ -479,28 +523,20 @@ def _cmd_add(project: Path, cwd: Path, args: list[str]) -> None:
         return
 
     if sub == "collection":
-        path = args[1] if len(args) > 1 else None
+        slug  = args[1] if len(args) > 1 else None
         title = " ".join(args[2:]) if len(args) > 2 else None
 
-        if path is None:
-            try:
-                default_path = str(cwd.relative_to(content))
-            except ValueError:
-                default_path = ""
-            path = _ask("path", complete_from=content, default=default_path)
-            if path is None:
+        if slug is None:
+            slug = _ask("slug")
+            if not slug:
                 return
 
         if title is None:
-            title = _ask("title")
+            title = _ask("title", default=_slug_to_title(slug))
             if not title:
                 return
 
-        path = path.rstrip("/")
-        coll_dir = (cwd / path) if not (content / path).is_dir() else (content / path)
-        if not coll_dir.is_relative_to(content):
-            coll_dir = content / path
-
+        coll_dir = cwd / slug.rstrip("/")
         md_file = coll_dir / "_collection.md"
         if md_file.exists():
             print(f"  already exists: {md_file.relative_to(project)}")
@@ -511,22 +547,25 @@ def _cmd_add(project: Path, cwd: Path, args: list[str]) -> None:
         return
 
     if sub == "kind":
-        path = args[1] if len(args) > 1 else None
+        # path is relative to kinds root, e.g. "celestial/planet"
+        path     = args[1] if len(args) > 1 else None
         singular = args[2] if len(args) > 2 else None
-        plural = args[3] if len(args) > 3 else None
+        plural   = args[3] if len(args) > 3 else None
 
         if path is None:
             path = _ask("kinds path", complete_from=kinds)
             if path is None:
                 return
 
+        leaf = path.rstrip("/").split("/")[-1]
+
         if singular is None:
-            singular = _ask("singular name")
+            singular = _ask("singular", default=_slug_to_title(leaf))
             if not singular:
                 return
 
         if plural is None:
-            plural = _ask("plural name", default=f"{singular}s")
+            plural = _ask("plural", default=f"{singular}s")
             if not plural:
                 plural = f"{singular}s"
 
@@ -886,9 +925,9 @@ def _cmd_help() -> None:
   cd ..                                 go up one level
   cd                                    go back to content root
   tree [path]                           show subtree from current dir (or path)
-  add entity <path> <name> <kind>       create entity stub
-  add collection <path> <title>         create collection folder
-  add kind <path> <singular> [plural]   create kind stub
+  add entity <path> <slug> [name] [kind]       create entity stub under path
+  add collection <slug> [title]         create collection folder under cwd
+  add kind <kinds-path> [singular] [plural]  create kind stub
   move <entity-path> <new-parent>       move entity and rewrite all references
   move --kind <kind-path> <new-parent>  move kind within content_meta/kinds/ (no ref rewrites)
   rename <old-path> <new-slug>          rename entity or kind slug, rewrite all references
@@ -896,8 +935,7 @@ def _cmd_help() -> None:
   help                                  show this help
   exit / quit                           leave the shell
 
-  Tab completion is available for all path and kind arguments.
-  Use quotes for names with spaces: add entity places/my-city "My City" planet
+  Tab opens completion menu; arrow keys navigate; Tab again accepts selection.
   Any argument can be omitted; the shell will prompt for it.
     """
     )
