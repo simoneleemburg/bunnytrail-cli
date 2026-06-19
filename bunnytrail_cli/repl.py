@@ -945,32 +945,94 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
     )
 
     _ENTITY_BUILTINS = ["name", "kind", "summary", "class"]
+    _KIND_FIELDS = ["singular", "plural", "definition"]
 
     world_cfg = load_world_config(project)
+    kinds = kinds_root(project)
 
     # --------------------------------------------------------- ask what to check
-    # Offer builtins + all world properties as completions up front.
     all_world_slugs = list({p.slug for p in world_cfg.applicable_properties("")})
-    field_choices = _ENTITY_BUILTINS + [s for s in all_world_slugs if s not in _ENTITY_BUILTINS]
+    field_choices = (
+        _KIND_FIELDS
+        + [s for s in _ENTITY_BUILTINS if s not in _KIND_FIELDS]
+        + [s for s in all_world_slugs if s not in _ENTITY_BUILTINS and s not in _KIND_FIELDS]
+    )
     field = _ask("check what?", completer=field_choices)  # type: ignore[arg-type]
     if not field:
         return
 
+    is_kind_field = field in _KIND_FIELDS
+
     # ---------------------------------------------------------------- resolve path
     if args:
         raw = args[0].rstrip("/")
-        target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+        if is_kind_field:
+            target = (kinds / raw).resolve()
+        else:
+            target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
     else:
-        raw = _ask("path", complete_from_cwd=(cwd, content))
-        if not raw:
-            return
-        raw = raw.rstrip("/")
-        target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+        if is_kind_field:
+            raw = _ask("kinds path", complete_from=kinds, default=".")
+            if not raw:
+                return
+            raw = raw.rstrip("/")
+            target = (kinds / raw).resolve() if raw not in ("", ".") else kinds
+        else:
+            raw = _ask("path", complete_from_cwd=(cwd, content))
+            if not raw:
+                return
+            raw = raw.rstrip("/")
+            target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
 
     if not target.is_dir():
         print(f"  not a directory: {raw}")
         return
 
+    # ============================================================ KINDS mode
+    if is_kind_field:
+        kind_yaml_files = sorted(target.rglob("_kind.yaml"))
+        if not kind_yaml_files:
+            print("  (no kinds found)")
+            return
+
+        missing: list[str] = []
+        missing_files: list[Path] = []
+        for yaml_file in kind_yaml_files:
+            lines = yaml_file.read_text(encoding="utf-8").splitlines()
+            val = _parse_yaml_field(lines, field)
+            if not val:
+                slug = yaml_file.parent.name
+                rel = yaml_file.parent.relative_to(kinds)
+                missing.append(f"- {slug}  ({rel})")
+                missing_files.append(yaml_file)
+
+        if not missing:
+            print(f"  all kinds have {field!r}")
+            return
+
+        print(f"\n  missing {field!r}:")
+        print("\n".join(f"  {line}" for line in missing))
+
+        answer = _ask(f"\n  add {field!r} to these now?", completer=["y", "n"], default="n")
+        if not answer or answer.lower() not in ("y", "yes"):
+            return
+
+        for yaml_file in missing_files:
+            lines = yaml_file.read_text(encoding="utf-8").splitlines()
+            slug = yaml_file.parent.name
+            print(f"\n  {slug}")
+            val = _ask(f"{field} (optional)")
+            if val is None:
+                return
+            if not val:
+                continue
+            # Append the new field at the end of the file
+            existing = yaml_file.read_text(encoding="utf-8")
+            yaml_file.write_text(existing.rstrip("\n") + f"\n{field}: {val}\n", encoding="utf-8")
+            print(f"  updated {yaml_file.relative_to(project)}")
+        return
+
+    # ============================================================ ENTITY mode
     # Collect entities under target (or just target itself if it's an entity)
     entity_dirs: list[Path] = []
     if is_entity_folder(target):
@@ -988,7 +1050,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         return
 
     # --------------------------------------------------------- scan and report
-    missing: list[str] = []
+    missing_ent: list[str] = []
     missing_dirs: list[Path] = []
     skipped: list[str] = []
 
@@ -1007,17 +1069,17 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         if not _parse_yaml_field(fm, field):
             name = _parse_yaml_field(fm, "name") or ent_dir.name
             rel = ent_dir.relative_to(content)
-            missing.append(f"- {name}  ({rel})")
+            missing_ent.append(f"- {name}  ({rel})")
             missing_dirs.append(ent_dir)
 
-    if not missing:
+    if not missing_ent:
         print(f"  all entities have {field!r}")
         if skipped:
             print(f"  ({len(skipped)} entities skipped — {field!r} not applicable to their kind)")
         return
 
     print(f"\n  missing {field!r}:")
-    print("\n".join(f"  {line}" for line in missing))
+    print("\n".join(f"  {line}" for line in missing_ent))
     if skipped:
         print(f"  ({len(skipped)} entities skipped — {field!r} not applicable to their kind)")
 
@@ -1054,31 +1116,92 @@ def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None
     )
 
     _ENTITY_BUILTINS = ["name", "kind", "summary", "class"]
+    _KIND_FIELDS = ["singular", "plural", "definition"]
 
     world_cfg = load_world_config(project)
+    kinds = kinds_root(project)
 
     # -------------------------------------------------------- ask what to strip
     all_world_slugs = list({p.slug for p in world_cfg.applicable_properties("")})
-    field_choices = _ENTITY_BUILTINS + [s for s in all_world_slugs if s not in _ENTITY_BUILTINS]
+    field_choices = (
+        _KIND_FIELDS
+        + [s for s in _ENTITY_BUILTINS if s not in _KIND_FIELDS]
+        + [s for s in all_world_slugs if s not in _ENTITY_BUILTINS and s not in _KIND_FIELDS]
+    )
     field = _ask("strip what?", completer=field_choices)  # type: ignore[arg-type]
     if not field:
         return
 
+    is_kind_field = field in _KIND_FIELDS
+
     # -------------------------------------------------------------- resolve path
     if args:
         raw = args[0].rstrip("/")
-        target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+        if is_kind_field:
+            target = (kinds / raw).resolve()
+        else:
+            target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
     else:
-        raw = _ask("path", complete_from_cwd=(cwd, content))
-        if not raw:
-            return
-        raw = raw.rstrip("/")
-        target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+        if is_kind_field:
+            raw = _ask("kinds path", complete_from=kinds, default=".")
+            if not raw:
+                return
+            raw = raw.rstrip("/")
+            target = (kinds / raw).resolve() if raw not in ("", ".") else kinds
+        else:
+            raw = _ask("path", complete_from_cwd=(cwd, content))
+            if not raw:
+                return
+            raw = raw.rstrip("/")
+            target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
 
     if not target.is_dir():
         print(f"  not a directory: {raw}")
         return
 
+    # ============================================================ KINDS mode
+    if is_kind_field:
+        kind_yaml_files = sorted(target.rglob("_kind.yaml"))
+        if not kind_yaml_files:
+            print("  (no kinds found)")
+            return
+
+        has_field: list[str] = []
+        has_field_files: list[Path] = []
+        for yaml_file in kind_yaml_files:
+            lines = yaml_file.read_text(encoding="utf-8").splitlines()
+            val = _parse_yaml_field(lines, field)
+            if val:
+                slug = yaml_file.parent.name
+                rel = yaml_file.parent.relative_to(kinds)
+                has_field.append(f"- {slug}  ({rel})")
+                has_field_files.append(yaml_file)
+
+        if not has_field_files:
+            print(f"  no kinds have {field!r}")
+            return
+
+        print(f"\n  has {field!r}:")
+        print("\n".join(f"  {line}" for line in has_field))
+
+        answer = _ask(f"\n  remove {field!r} from all of these?", completer=["y", "n"], default="n")
+        if not answer or answer.lower() not in ("y", "yes"):
+            return
+
+        prefix = f"{field}:"
+        for yaml_file in has_field_files:
+            lines = yaml_file.read_text(encoding="utf-8").splitlines()
+            new_lines = [
+                ln for ln in lines
+                if not (ln.strip().startswith(prefix) and (
+                    len(ln.strip()) == len(prefix) or ln.strip()[len(prefix)] in (" ", "\t")
+                ))
+            ]
+            yaml_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            print(f"  updated {yaml_file.relative_to(project)}")
+        return
+
+    # ============================================================ ENTITY mode
     entity_dirs: list[Path] = []
     if is_entity_folder(target):
         entity_dirs = [target]
@@ -1095,7 +1218,7 @@ def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         return
 
     # ---------------------------------------------------- scan: find entities that have the field
-    has_field: list[str] = []
+    has_field_ent: list[str] = []
     has_field_dirs: list[Path] = []
 
     for ent_dir in entity_dirs:
@@ -1107,7 +1230,7 @@ def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         if _parse_yaml_field(fm, field):
             name = _parse_yaml_field(fm, "name") or ent_dir.name
             rel = ent_dir.relative_to(content)
-            has_field.append(f"- {name}  ({rel})")
+            has_field_ent.append(f"- {name}  ({rel})")
             has_field_dirs.append(ent_dir)
 
     if not has_field_dirs:
@@ -1115,7 +1238,7 @@ def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         return
 
     print(f"\n  has {field!r}:")
-    print("\n".join(f"  {line}" for line in has_field))
+    print("\n".join(f"  {line}" for line in has_field_ent))
 
     # --------------------------------------------------------- confirm
     answer = _ask(f"\n  remove {field!r} from all of these?", completer=["y", "n"], default="n")
@@ -1437,6 +1560,8 @@ def _cmd_add(
             if not plural:
                 plural = f"{singular}s"
 
+        definition = _ask("definition (optional)")
+
         path = path.rstrip("/")
         if path in ("", "."):
             kind_dir = kinds / slug
@@ -1447,7 +1572,10 @@ def _cmd_add(
             print(f"  already exists: {md_file.relative_to(project)}")
             return
         kind_dir.mkdir(parents=True, exist_ok=True)
-        md_file.write_text(f"singular: {singular}\nplural: {plural}\n", encoding="utf-8")
+        content_lines = f"singular: {singular}\nplural: {plural}\n"
+        if definition:
+            content_lines += f"definition: {definition}\n"
+        md_file.write_text(content_lines, encoding="utf-8")
         print(f"  created {md_file.relative_to(project)}")
         return
 
@@ -1596,15 +1724,20 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
     else:
         kind_dir = kinds / old_path
         if kind_dir.is_dir() and (kind_dir / "_kind.yaml").is_file():
-            old_singular, old_plural = read_kind_display_names(kind_dir)
+            old_singular, old_plural, old_definition = read_kind_display_names(kind_dir)
+            new_singular_default = _slug_to_title(new_slug)
+            new_plural_default = f"{new_singular_default}s"
             if old_singular:
-                answer = _ask("new singular", default=old_singular)
+                answer = _ask("new singular", default=new_singular_default)
                 if answer and answer != old_singular:
                     new_display["singular"] = answer
             if old_plural:
-                answer = _ask("new plural", default=old_plural)
+                answer = _ask("new plural", default=new_plural_default)
                 if answer and answer != old_plural:
                     new_display["plural"] = answer
+            answer = _ask("definition (optional)", default=old_definition)
+            if answer is not None and answer != old_definition:
+                new_display["definition"] = answer
 
     plan = plan_rename(
         project, old_path, new_slug,

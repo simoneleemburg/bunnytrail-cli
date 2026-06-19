@@ -241,7 +241,7 @@ def add_collection(
 @click.argument("path")
 @click.argument("singular")
 @click.argument("plural", required=False, default="")
-@click.option("--description", default="", help="Short description of the kind.")
+@click.option("--definition", default="", help="Short definition of the kind.")
 @click.option("--force", is_flag=True, help="Overwrite existing _kind.yaml.")
 @click.pass_context
 def add_kind(
@@ -249,7 +249,7 @@ def add_kind(
     path: str,
     singular: str,
     plural: str,
-    description: str,
+    definition: str,
     force: bool,
 ) -> None:
     """Create a new kind stub at content_meta/kinds/PATH.
@@ -275,8 +275,8 @@ def add_kind(
 
     plural_val = plural or f"{singular}s"
     lines = [f"singular: {singular}", f"plural: {plural_val}"]
-    if description:
-        lines.append(f"description: {description}")
+    if definition:
+        lines.append(f"definition: {definition}")
     md_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     click.echo(f"Created kind stub: {md_file.relative_to(root)}")
 
@@ -367,7 +367,7 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
     else:
         kind_dir = (cwd_kinds / old_path.rstrip("/")).resolve()
         if kind_dir.is_dir() and (kind_dir / "_kind.yaml").is_file():
-            old_singular, old_plural = read_kind_display_names(kind_dir)
+            old_singular, old_plural, old_definition = read_kind_display_names(kind_dir)
             if old_singular:
                 ns = click.prompt(
                     f"  new singular (current: {old_singular!r})",
@@ -384,6 +384,13 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
                 )
                 if np and np != old_plural:
                     new_display["plural"] = np
+            nd = click.prompt(
+                f"  new definition (current: {old_definition!r})" if old_definition else "  definition (optional)",
+                default=old_definition,
+                show_default=False,
+            )
+            if nd and nd != old_definition:
+                new_display["definition"] = nd
 
     plan = plan_rename(
         root, old_path.rstrip("/"), new_slug,

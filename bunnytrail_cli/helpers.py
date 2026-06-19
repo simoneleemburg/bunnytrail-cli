@@ -1964,14 +1964,23 @@ def read_entity_display_name(entity_dir: Path) -> str:
     return _parse_yaml_field(frontmatter_lines(md.read_text(encoding="utf-8")), "name")
 
 
-def read_kind_display_names(kind_dir: Path) -> tuple[str, str]:
-    """Return ``(singular, plural)`` from ``_kind.yaml``, or ``("", "")``."""
+def read_kind_display_names(kind_dir: Path) -> tuple[str, str, str]:
+    """Return ``(singular, plural, definition)`` from ``_kind.yaml``.
+
+    Returns ``("", "", "")`` if the file is absent.  ``definition`` is
+    the optional prose description of the kind; it may be an empty string
+    when the field is not present in the file.
+    """
     md = kind_dir / "_kind.yaml"
     if not md.is_file():
-        return "", ""
+        return "", "", ""
     # _kind.yaml is plain YAML (no frontmatter fences)
     lines = md.read_text(encoding="utf-8").splitlines()
-    return _parse_yaml_field(lines, "singular"), _parse_yaml_field(lines, "plural")
+    return (
+        _parse_yaml_field(lines, "singular"),
+        _parse_yaml_field(lines, "plural"),
+        _parse_yaml_field(lines, "definition"),
+    )
 
 
 def plan_rename(
@@ -2079,7 +2088,7 @@ def plan_rename(
         # Compute display-name renames (singular / plural) and a label-
         # rewrite map for use inside [[kinds/<slug>|Label]] wikilinks.
         # ------------------------------------------------------------------
-        old_singular, old_plural = read_kind_display_names(old_dir)
+        old_singular, old_plural, old_definition = read_kind_display_names(old_dir)
         if new_display_names:
             new_singular = new_display_names.get("singular", old_singular)
             new_plural = new_display_names.get("plural", old_plural)
@@ -2148,14 +2157,16 @@ def plan_rename(
                     refs.append(MoveRef(md_file, i, line, new_line))
 
         # Frontmatter edits on the renamed kind's own _kind.yaml.
-        if display_renames:
+        if display_renames or (new_display_names and "definition" in new_display_names):
             kind_yaml = old_dir / "_kind.yaml"
             if kind_yaml.is_file():
+                new_definition = new_display_names.get("definition", old_definition) if new_display_names else old_definition
                 fm_refs = _yaml_field_edits(
                     kind_yaml,
-                    {"singular": new_display_names.get("singular", old_singular),
-                     "plural": new_display_names.get("plural", old_plural)},
-                    current={"singular": old_singular, "plural": old_plural},
+                    {"singular": new_display_names.get("singular", old_singular) if new_display_names else old_singular,
+                     "plural":   new_display_names.get("plural",   old_plural)   if new_display_names else old_plural,
+                     "definition": new_definition},
+                    current={"singular": old_singular, "plural": old_plural, "definition": old_definition},
                 )
                 refs.extend(fm_refs)
 
