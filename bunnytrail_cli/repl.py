@@ -1411,20 +1411,24 @@ def _cmd_add(
             return None
 
     if sub == "kind":
-        # path is relative to kinds root, e.g. "celestial/planet"
         path     = args[1] if len(args) > 1 else None
-        singular = args[2] if len(args) > 2 else None
-        plural   = args[3] if len(args) > 3 else None
+        slug     = args[2] if len(args) > 2 else None
+        singular = args[3] if len(args) > 3 else None
+        plural   = args[4] if len(args) > 4 else None
 
         if path is None:
-            path = _ask("kinds path", complete_from=kinds)
+            path = _ask("path", complete_from=kinds, default=".")
             if path is None:
                 return
 
-        leaf = path.rstrip("/").split("/")[-1]
+        if slug is None:
+            slug = _ask("slug")
+            if not slug:
+                return
+        slug = slug.rstrip("/")
 
         if singular is None:
-            singular = _ask("singular", default=_slug_to_title(leaf))
+            singular = _ask("singular", default=_slug_to_title(slug))
             if not singular:
                 return
 
@@ -1433,7 +1437,11 @@ def _cmd_add(
             if not plural:
                 plural = f"{singular}s"
 
-        kind_dir = kinds / path.rstrip("/")
+        path = path.rstrip("/")
+        if path in ("", "."):
+            kind_dir = kinds / slug
+        else:
+            kind_dir = kinds / path / slug
         md_file = kind_dir / "_kind.yaml"
         if md_file.exists():
             print(f"  already exists: {md_file.relative_to(project)}")
@@ -1795,7 +1803,7 @@ def _cmd_help() -> None:
   tree [path]                           show subtree from current dir (or path)
   add entity <kind> <slug> [name] [path]       create entity stub (kind first, then place it)
   add collection <slug> [title]         create collection folder under cwd
-  add kind <kinds-path> [singular] [plural]  create kind stub
+  add kind <path> <slug> [singular] [plural]  create kind stub
   move <entity-path> <new-parent>       move entity and rewrite all references
   move --kind <kind-path> <new-parent>  move kind within content_meta/kinds/ (no ref rewrites)
   rename <old-path> <new-slug>          rename entity or kind slug, rewrite all references
