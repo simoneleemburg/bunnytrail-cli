@@ -550,6 +550,67 @@ def _cmd_ls(cwd: Path, content: Path) -> None:
             print(f"       {child.name}")
 
 
+def _cmd_info(cwd: Path, content: Path) -> None:
+    from .helpers import frontmatter_lines, _parse_yaml_field, is_collection_folder  # type: ignore[attr-defined]
+
+    output: list[str] = []
+
+    def _info_section(folder: Path, depth: int) -> None:
+        """Recursively collect output lines for *folder* at heading *depth*."""
+        entries: list[tuple[str, str]] = []
+        subcollections: list[Path] = []
+
+        for child in sorted(folder.iterdir()):
+            if child.name.startswith(".") or child.name.startswith("_"):
+                continue
+            if not child.is_dir():
+                continue
+            if is_entity_folder(child):
+                try:
+                    text = (child / "index.md").read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                fm = frontmatter_lines(text)
+                name = _parse_yaml_field(fm, "name") or child.name
+                summary = _parse_yaml_field(fm, "summary")
+                entries.append((name, summary))
+            elif is_collection_folder(child):
+                subcollections.append(child)
+
+        if entries:
+            col_width = max(len(name) for name, _ in entries)
+            for name, summary in entries:
+                if summary:
+                    output.append(f"- {name:<{col_width}}  -  {summary}")
+                else:
+                    output.append(f"- {name}")
+
+        for coll in subcollections:
+            try:
+                coll_text = (coll / "_collection.md").read_text(encoding="utf-8")
+            except OSError:
+                coll_text = ""
+            fm = frontmatter_lines(coll_text)
+            title = _parse_yaml_field(fm, "title") or coll.name
+            description = _parse_yaml_field(fm, "description")
+            hashes = "#" * min(depth, 6)
+            header = f"{hashes} {title}"
+            if description:
+                header += f"  -  {description}"
+            if output:
+                output.append("")
+            output.append(header)
+            _info_section(coll, depth + 1)
+
+    _info_section(cwd, 1)
+
+    if not output:
+        print("(no entities here)")
+        return
+
+    print("\n".join(output))
+
+
 def _cmd_tree(cwd: Path, content: Path, args: list[str]) -> None:
     base = cwd
     depth = 3
@@ -1174,6 +1235,7 @@ def _cmd_help() -> None:
   --------
   hello                                 project stats
   ls                                    list current directory
+  info                                  show name and summary for entities in current directory
   cd <path>                             change directory (relative or from content root)
   cd ..                                 go up one level
   cd                                    go back to content root
@@ -1254,6 +1316,8 @@ def run_shell(project: Path) -> None:
             _cmd_hello(project)
         elif cmd == "ls":
             _cmd_ls(cwd, content)
+        elif cmd == "info":
+            _cmd_info(cwd, content)
         elif cmd == "tree":
             _cmd_tree(cwd, content, args)
         elif cmd == "cd":
