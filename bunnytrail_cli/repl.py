@@ -937,6 +937,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         frontmatter_lines,
         _parse_yaml_field,
         is_collection_folder,
+        split_frontmatter,
     )
 
     _ENTITY_BUILTINS = ["name", "kind", "summary", "class"]
@@ -984,6 +985,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
 
     # --------------------------------------------------------- scan and report
     missing: list[str] = []
+    missing_dirs: list[Path] = []
     skipped: list[str] = []
 
     for ent_dir in entity_dirs:
@@ -1002,16 +1004,41 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
             name = _parse_yaml_field(fm, "name") or ent_dir.name
             rel = ent_dir.relative_to(content)
             missing.append(f"- {name}  ({rel})")
+            missing_dirs.append(ent_dir)
 
-    if missing:
-        print(f"\n  missing {field!r}:")
-        print("\n".join(f"  {line}" for line in missing))
-    else:
+    if not missing:
         print(f"  all entities have {field!r}")
+        if skipped:
+            print(f"  ({len(skipped)} entities skipped — {field!r} not applicable to their kind)")
+        return
 
+    print(f"\n  missing {field!r}:")
+    print("\n".join(f"  {line}" for line in missing))
     if skipped:
         print(f"  ({len(skipped)} entities skipped — {field!r} not applicable to their kind)")
-        print(f"  ({len(skipped)} entities skipped — {field!r} not applicable to their kind)")
+
+    # ---------------------------------------------------- offer to fill them in
+    answer = _ask(f"\n  add {field!r} to these now?", completer=["y", "n"], default="n")
+    if not answer or answer.lower() not in ("y", "yes"):
+        return
+
+    for ent_dir in missing_dirs:
+        md_file = ent_dir / "index.md"
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"  cannot read {md_file}: {exc}")
+            continue
+        fm_str, body = split_frontmatter(text)
+        fm_lines = (fm_str or "").splitlines()
+        get = lambda f, _fl=fm_lines: _parse_yaml_field(_fl, f)
+        kind_id = get("kind")
+
+        print(f"\n  {get('name') or ent_dir.name}")
+        ok = _prompt_single_field(field, md_file, kind_id, fm_lines, body)
+        if not ok:
+            return
+        print(f"  updated {md_file.relative_to(project)}")
 
 
 def _cmd_tree(cwd: Path, content: Path, args: list[str]) -> None:
