@@ -424,7 +424,7 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
     else:
         kind_dir = (cwd_kinds / old_path.rstrip("/")).resolve()
         if kind_dir.is_dir() and (kind_dir / "_kind.yaml").is_file():
-            old_singular, old_plural, old_definition = read_kind_display_names(kind_dir)
+            old_singular, old_plural, old_description = read_kind_display_names(kind_dir)
             if old_singular:
                 ns = click.prompt(
                     f"  new singular (current: {old_singular!r})",
@@ -442,12 +442,12 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
                 if np and np != old_plural:
                     new_display["plural"] = np
             nd = click.prompt(
-                f"  new definition (current: {old_definition!r})" if old_definition else "  definition (optional)",
-                default=old_definition,
+                f"  new description (current: {old_description!r})" if old_description else "  description (optional)",
+                default=old_description,
                 show_default=False,
             )
-            if nd and nd != old_definition:
-                new_display["definition"] = nd
+            if nd and nd != old_description:
+                new_display["description"] = nd
 
     plan = plan_rename(
         root, old_path.rstrip("/"), new_slug,

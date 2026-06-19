@@ -948,7 +948,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
     )
 
     _ENTITY_BUILTINS = ["name", "kind", "summary", "class"]
-    _KIND_FIELDS = ["singular", "plural", "definition"]
+    _KIND_FIELDS = ["singular", "plural", "description"]
 
     world_cfg = load_world_config(project)
     kinds = kinds_root(project)
@@ -1119,7 +1119,7 @@ def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None
     )
 
     _ENTITY_BUILTINS = ["name", "kind", "summary", "class"]
-    _KIND_FIELDS = ["singular", "plural", "definition"]
+    _KIND_FIELDS = ["singular", "plural", "description"]
 
     world_cfg = load_world_config(project)
     kinds = kinds_root(project)
@@ -1563,7 +1563,7 @@ def _cmd_add(
             if not plural:
                 plural = f"{singular}s"
 
-        definition = _ask("definition (optional)")
+        description = _ask("description (optional)")
 
         path = path.rstrip("/")
         if path in ("", "."):
@@ -1576,8 +1576,8 @@ def _cmd_add(
             return
         kind_dir.mkdir(parents=True, exist_ok=True)
         content_lines = f"singular: {singular}\nplural: {plural}\n"
-        if definition:
-            content_lines += f"definition: {definition}\n"
+        if description:
+            content_lines += f"description: {description}\n"
         md_file.write_text(content_lines, encoding="utf-8")
         print(f"  created {md_file.relative_to(project)}")
         return
@@ -1761,7 +1761,7 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
     else:
         kind_dir = kinds / old_path
         if kind_dir.is_dir() and (kind_dir / "_kind.yaml").is_file():
-            old_singular, old_plural, old_definition = read_kind_display_names(kind_dir)
+            old_singular, old_plural, old_description = read_kind_display_names(kind_dir)
             new_singular_default = _slug_to_title(new_slug)
             new_plural_default = f"{new_singular_default}s"
             if old_singular:
@@ -1772,9 +1772,9 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
                 answer = _ask("new plural", default=new_plural_default)
                 if answer and answer != old_plural:
                     new_display["plural"] = answer
-            answer = _ask("definition (optional)", default=old_definition)
-            if answer is not None and answer != old_definition:
-                new_display["definition"] = answer
+            answer = _ask("description (optional)", default=old_description)
+            if answer is not None and answer != old_description:
+                new_display["description"] = answer
 
     plan = plan_rename(
         project, old_path, new_slug,
