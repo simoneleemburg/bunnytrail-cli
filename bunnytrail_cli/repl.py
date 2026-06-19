@@ -611,6 +611,409 @@ def _cmd_info(cwd: Path, content: Path) -> None:
     print("\n".join(output))
 
 
+def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
+    from .helpers import (  # type: ignore[attr-defined]
+        frontmatter_lines,
+        _parse_yaml_field,
+        is_collection_folder,
+        split_frontmatter,
+    )
+
+    # ------------------------------------------------------------------ helpers
+
+    def _resolve(raw: str) -> Path:
+        raw = raw.rstrip("/")
+        if raw.startswith("/"):
+            return (content / raw.lstrip("/")).resolve()
+        return (cwd / raw).resolve()
+
+    def _read_entity(md_file: Path) -> tuple[list[str], str] | None:
+        """Return (fm_lines, body) or None on error."""
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"  cannot read {md_file}: {exc}")
+            return None
+        fm_str, body = split_frontmatter(text)
+        return (fm_str or "").splitlines(), body
+
+    def _write_entity(
+        md_file: Path,
+        name: str,
+        kind_id: str,
+        entity_class: str,
+        summary: str,
+        prop_values: dict[str, str],
+        relation_entries: list[dict[str, str]],
+        body: str,
+    ) -> None:
+        fm = f"name: {name}\nkind: {kind_id}"
+        if entity_class:
+            fm += f"\nclass: {entity_class.strip('/')}"
+        if summary:
+            fm += f"\nsummary: {summary}"
+        for prop_slug, prop_val in prop_values.items():
+            if any(c in prop_val for c in (':', '#', '[', ']', '{', '}', '&', '*', '!', '|', '>', "'", '"')):
+                fm += f'\n{prop_slug}: "{prop_val}"'
+            else:
+                fm += f"\n{prop_slug}: {prop_val}"
+        if relation_entries:
+            fm += "\nrelations:"
+            for entry in relation_entries:
+                fm += f"\n  - kind: {entry['kind']}"
+                fm += f"\n    target: {entry['target']}"
+        write_frontmatter_md(md_file, fm, body)
+
+    def _prompt_single_field(
+        field: str,
+        md_file: Path,
+        kind_id: str,
+        fm_lines: list[str],
+        body: str,
+    ) -> bool:
+        """Prompt for one field, patch it in place, write, return False on cancel."""
+        kinds = kinds_root(project)
+        bt_cfg = load_bt_config(project)
+        world_cfg = load_world_config(project)
+        get = lambda f: _parse_yaml_field(fm_lines, f)
+
+        # Re-read all existing values so we can write a complete frontmatter
+        name = get("name")
+        kind_val = get("kind") or kind_id
+        summary = get("summary")
+        entity_class = get("class")
+        prop_values: dict[str, str] = {
+            p.slug: v for p in world_cfg.applicable_properties(kind_id)
+            if (v := get(p.slug))
+        }
+        # We preserve existing relation_entries as-is when editing a single field
+        # (raw re-parse isn't trivial; relations stay unchanged unless field=="relations")
+        relation_entries: list[dict[str, str]] = []
+        # simple re-parse of relations block
+        in_rel = False
+        cur: dict[str, str] = {}
+        for line in fm_lines:
+            s = line.strip()
+            if s == "relations:":
+                in_rel = True
+                continue
+            if in_rel:
+                if s.startswith("- kind:"):
+                    if cur:
+                        relation_entries.append(cur)
+                    cur = {"kind": s[len("- kind:"):].strip()}
+                elif s.startswith("kind:"):
+                    cur["kind"] = s[len("kind:"):].strip()
+                elif s.startswith("target:"):
+                    cur["target"] = s[len("target:"):].strip()
+                elif s and not s.startswith("-"):
+                    in_rel = False
+        if cur:
+            relation_entries.append(cur)
+
+        if field == "name":
+            val = _ask("name", default=name)
+            if val is None:
+                return False
+            name = val
+        elif field == "kind":
+            kind_ids = _all_kind_ids(kinds)
+            val = _ask("kind", completer=kind_ids, default=kind_val)  # type: ignore[arg-type]
+            if val is None:
+                return False
+            kind_val = val.split("/")[-1]
+            kind_id = kind_val
+        elif field == "summary":
+            val = _ask("summary (optional)", default=summary)
+            if val is None:
+                return False
+            summary = val
+        elif field == "class":
+            val = _ask("class", complete_from_cwd=(cwd, content), default=entity_class)
+            if val is None:
+                return False
+            entity_class = val
+        else:
+            # world property
+            prop_def = next((p for p in world_cfg.applicable_properties(kind_id) if p.slug == field), None)
+            if prop_def is None:
+                print(f"  unknown field: {field!r}")
+                return False
+            hint = f"  [{', '.join(prop_def.values[:4])}{'…' if len(prop_def.values) > 4 else ''}]" if prop_def.values else ""
+            val = _ask(f"{field} (optional){hint}", completer=prop_def.values if prop_def.values else None, default=get(field))  # type: ignore[arg-type]
+            if val is None:
+                return False
+            if val:
+                prop_values[field] = val
+            else:
+                prop_values.pop(field, None)
+
+        _write_entity(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body)
+        return True
+
+    # ---------------------------------------------------------------- resolve path
+
+    if args:
+        target = _resolve(args[0])
+        path_label = args[0].rstrip("/")
+    else:
+        raw = _ask("path", complete_from_cwd=(cwd, content))
+        if not raw:
+            return
+        target = _resolve(raw)
+        path_label = raw.rstrip("/")
+
+    if not target.is_dir():
+        print(f"  not a directory: {path_label}")
+        return
+
+    kinds = kinds_root(project)
+    bt_cfg = load_bt_config(project)
+    world_cfg = load_world_config(project)
+
+    # ----------------------------------------------------------- determine scope
+
+    # Collect entities to edit: either just the one target or all entities under a collection
+    entity_targets: list[Path] = []
+    collection_target: Path | None = None
+
+    if is_entity_folder(target):
+        entity_targets = [target]
+    elif is_collection_folder(target):
+        collection_target = target
+        for child in sorted(target.rglob("index.md")):
+            if is_entity_folder(child.parent):
+                entity_targets.append(child.parent)
+    else:
+        print(f"  not an entity or collection folder: {path_label}")
+        return
+
+    # -------------------------------------------------- build field completions
+
+    # Determine applicable fields from the first entity (or collection itself)
+    if collection_target and not entity_targets:
+        # Collection-only edit (title/description)
+        field_choices = ["all", "title", "description"]
+    else:
+        # Sample the first entity's kind for property completions
+        sample_kind = ""
+        if entity_targets:
+            result = _read_entity(entity_targets[0] / "index.md")
+            if result:
+                sample_kind = _parse_yaml_field(result[0], "kind")
+        base_fields = ["all", "name", "kind", "summary", "class"]
+        prop_fields = [p.slug for p in world_cfg.applicable_properties(sample_kind)]
+        field_choices = base_fields + prop_fields
+
+    # --------------------------------------------------------- ask what to edit
+
+    field = _ask("edit what?", completer=field_choices, default="all")  # type: ignore[arg-type]
+    if not field:
+        return
+
+    # ============================================================ COLLECTION edit (title/description)
+
+    if collection_target and field in ("all", "title", "description"):
+        md_file = collection_target / "_collection.md"
+        result = _read_entity(md_file)  # reuse reader; same structure
+        if result is None:
+            return
+        fm_lines, body = result
+        get = lambda f: _parse_yaml_field(fm_lines, f)
+
+        if field in ("all", "title"):
+            title = _ask("title", default=get("title"))
+            if title is None:
+                return
+        else:
+            title = get("title")
+
+        if field in ("all", "description"):
+            description = _ask("description (optional)", default=get("description"))
+            if description is None:
+                return
+        else:
+            description = get("description")
+
+        fm = f"title: {title}"
+        if description:
+            fm += f"\ndescription: {description}"
+        write_frontmatter_md(md_file, fm, body)
+        print(f"  updated {md_file.relative_to(project)}")
+
+        if not entity_targets:
+            return
+        # fall through to edit entities under the collection too (only for "all")
+        if field != "all":
+            return
+
+    # ============================================================ ENTITY edit
+
+    for ent_dir in entity_targets:
+        md_file = ent_dir / "index.md"
+        result = _read_entity(md_file)
+        if result is None:
+            continue
+        fm_lines, body = result
+        get = lambda f, _fl=fm_lines: _parse_yaml_field(_fl, f)
+        kind_id = get("kind")
+
+        if len(entity_targets) > 1:
+            print(f"\n  {get('name') or ent_dir.name}")
+
+        if field == "all":
+            # Full interactive edit — same as before
+            name = _ask("name", default=get("name"))
+            if name is None:
+                return
+
+            kind_ids = _all_kind_ids(kinds)
+            kind = _ask("kind", completer=kind_ids, default=kind_id)  # type: ignore[arg-type]
+            if kind is None:
+                return
+            kind_id = kind.split("/")[-1]
+
+            summary = _ask("summary (optional)", default=get("summary"))
+            if summary is None:
+                return
+
+            entity_class: str = get("class")
+            old_class = get("class")
+            if old_class or kind_id in bt_cfg.add.class_for_kinds:
+                val = _ask("class", complete_from_cwd=(cwd, content), default=old_class)
+                if val is None:
+                    return
+                entity_class = val
+
+            prop_values: dict[str, str] = {}
+            for prop in world_cfg.applicable_properties(kind_id):
+                old_val = get(prop.slug)
+                hint = f"  [{', '.join(prop.values[:4])}{'…' if len(prop.values) > 4 else ''}]" if prop.values else ""
+                label = f"{prop.slug} (optional){hint}"
+                val = _ask(label, completer=prop.values if prop.values else None, default=old_val)  # type: ignore[arg-type]
+                if val is None:
+                    return
+                if val:
+                    prop_values[prop.slug] = val
+
+            applicable_rels = world_cfg.applicable_relations(kind_id)
+            applicable_rel_slugs = [r.slug for r in applicable_rels]
+            rel_by_slug = {r.slug: r for r in applicable_rels}
+            relation_entries: list[dict[str, str]] = []
+            if applicable_rel_slugs:
+                old_rels = get("relations")
+                if old_rels:
+                    print(f"  current relations: {old_rels}")
+                print("  relations — re-enter all (empty kind to finish):")
+                while True:
+                    rel_kind = _ask("  rel kind", completer=applicable_rel_slugs)  # type: ignore[arg-type]
+                    if not rel_kind:
+                        break
+                    rel_def = rel_by_slug.get(rel_kind)
+                    codomain = rel_def.codomain if rel_def else []
+                    if codomain:
+                        tc = _KindSuggestedPathCompleter(content, cwd, codomain)
+                        rel_target = _ask("  rel target", completer=tc)
+                    else:
+                        rel_target = _ask("  rel target", complete_from_cwd=(cwd, content))
+                    if not rel_target:
+                        break
+                    relation_entries.append({"kind": rel_kind, "target": rel_target.strip("/")})
+
+            _write_entity(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body)
+            print(f"  updated {md_file.relative_to(project)}")
+
+        else:
+            # Single-field edit
+            ok = _prompt_single_field(field, md_file, kind_id, fm_lines, body)
+            if not ok:
+                return
+            print(f"  updated {md_file.relative_to(project)}")
+
+
+
+def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
+    from .helpers import (  # type: ignore[attr-defined]
+        frontmatter_lines,
+        _parse_yaml_field,
+        is_collection_folder,
+    )
+
+    _ENTITY_BUILTINS = ["name", "kind", "summary", "class"]
+
+    world_cfg = load_world_config(project)
+
+    # --------------------------------------------------------- ask what to check
+    # Offer builtins + all world properties as completions up front.
+    all_world_slugs = list({p.slug for p in world_cfg.applicable_properties("")})
+    field_choices = _ENTITY_BUILTINS + [s for s in all_world_slugs if s not in _ENTITY_BUILTINS]
+    field = _ask("check what?", completer=field_choices)  # type: ignore[arg-type]
+    if not field:
+        return
+
+    # ---------------------------------------------------------------- resolve path
+    if args:
+        raw = args[0].rstrip("/")
+        target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+    else:
+        raw = _ask("path", complete_from_cwd=(cwd, content))
+        if not raw:
+            return
+        raw = raw.rstrip("/")
+        target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+
+    if not target.is_dir():
+        print(f"  not a directory: {raw}")
+        return
+
+    # Collect entities under target (or just target itself if it's an entity)
+    entity_dirs: list[Path] = []
+    if is_entity_folder(target):
+        entity_dirs = [target]
+    elif is_collection_folder(target) or target == content:
+        for md_file in sorted(target.rglob("index.md")):
+            if is_entity_folder(md_file.parent):
+                entity_dirs.append(md_file.parent)
+    else:
+        print(f"  not an entity or collection folder: {raw}")
+        return
+
+    if not entity_dirs:
+        print("  (no entities found)")
+        return
+
+    # --------------------------------------------------------- scan and report
+    missing: list[str] = []
+    skipped: list[str] = []
+
+    for ent_dir in entity_dirs:
+        try:
+            text = (ent_dir / "index.md").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        fm = frontmatter_lines(text)
+        kind_id = _parse_yaml_field(fm, "kind")
+        is_builtin = field in _ENTITY_BUILTINS
+        applicable = {p.slug for p in world_cfg.applicable_properties(kind_id)}
+        if not is_builtin and field not in applicable:
+            skipped.append(ent_dir.name)
+            continue
+        if not _parse_yaml_field(fm, field):
+            name = _parse_yaml_field(fm, "name") or ent_dir.name
+            rel = ent_dir.relative_to(content)
+            missing.append(f"- {name}  ({rel})")
+
+    if missing:
+        print(f"\n  missing {field!r}:")
+        print("\n".join(f"  {line}" for line in missing))
+    else:
+        print(f"  all entities have {field!r}")
+
+    if skipped:
+        print(f"  ({len(skipped)} entities skipped — {field!r} not applicable to their kind)")
+        print(f"  ({len(skipped)} entities skipped — {field!r} not applicable to their kind)")
+
+
 def _cmd_tree(cwd: Path, content: Path, args: list[str]) -> None:
     base = cwd
     depth = 3
@@ -1236,6 +1639,8 @@ def _cmd_help() -> None:
   hello                                 project stats
   ls                                    list current directory
   info                                  show name and summary for entities in current directory
+  edit <path>                           edit entity or collection frontmatter
+  check <path>                          list entities missing a world property
   cd <path>                             change directory (relative or from content root)
   cd ..                                 go up one level
   cd                                    go back to content root
@@ -1318,6 +1723,10 @@ def run_shell(project: Path) -> None:
             _cmd_ls(cwd, content)
         elif cmd == "info":
             _cmd_info(cwd, content)
+        elif cmd == "edit":
+            _cmd_edit(project, cwd, content, args)
+        elif cmd == "check":
+            _cmd_check(project, cwd, content, args)
         elif cmd == "tree":
             _cmd_tree(cwd, content, args)
         elif cmd == "cd":
