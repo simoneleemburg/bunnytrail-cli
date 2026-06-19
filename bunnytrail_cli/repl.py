@@ -54,9 +54,13 @@ HISTORY_FILE = Path.home() / ".bt_history"
 TOP_LEVEL_COMMANDS = [
     "hello",
     "ls",
+    "info",
     "tree",
     "cd",
     "add",
+    "edit",
+    "check",
+    "strip",
     "move",
     "rename",
     "crosslink",
@@ -1041,6 +1045,122 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         print(f"  updated {md_file.relative_to(project)}")
 
 
+def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
+    from .helpers import (  # type: ignore[attr-defined]
+        frontmatter_lines,
+        _parse_yaml_field,
+        is_collection_folder,
+        split_frontmatter,
+    )
+
+    _ENTITY_BUILTINS = ["name", "kind", "summary", "class"]
+
+    world_cfg = load_world_config(project)
+
+    # -------------------------------------------------------- ask what to strip
+    all_world_slugs = list({p.slug for p in world_cfg.applicable_properties("")})
+    field_choices = _ENTITY_BUILTINS + [s for s in all_world_slugs if s not in _ENTITY_BUILTINS]
+    field = _ask("strip what?", completer=field_choices)  # type: ignore[arg-type]
+    if not field:
+        return
+
+    # -------------------------------------------------------------- resolve path
+    if args:
+        raw = args[0].rstrip("/")
+        target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+    else:
+        raw = _ask("path", complete_from_cwd=(cwd, content))
+        if not raw:
+            return
+        raw = raw.rstrip("/")
+        target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+
+    if not target.is_dir():
+        print(f"  not a directory: {raw}")
+        return
+
+    entity_dirs: list[Path] = []
+    if is_entity_folder(target):
+        entity_dirs = [target]
+    elif is_collection_folder(target) or target == content:
+        for md_file in sorted(target.rglob("index.md")):
+            if is_entity_folder(md_file.parent):
+                entity_dirs.append(md_file.parent)
+    else:
+        print(f"  not an entity or collection folder: {raw}")
+        return
+
+    if not entity_dirs:
+        print("  (no entities found)")
+        return
+
+    # ---------------------------------------------------- scan: find entities that have the field
+    has_field: list[str] = []
+    has_field_dirs: list[Path] = []
+
+    for ent_dir in entity_dirs:
+        try:
+            text = (ent_dir / "index.md").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        fm = frontmatter_lines(text)
+        if _parse_yaml_field(fm, field):
+            name = _parse_yaml_field(fm, "name") or ent_dir.name
+            rel = ent_dir.relative_to(content)
+            has_field.append(f"- {name}  ({rel})")
+            has_field_dirs.append(ent_dir)
+
+    if not has_field_dirs:
+        print(f"  no entities have {field!r}")
+        return
+
+    print(f"\n  has {field!r}:")
+    print("\n".join(f"  {line}" for line in has_field))
+
+    # --------------------------------------------------------- confirm
+    answer = _ask(f"\n  remove {field!r} from all of these?", completer=["y", "n"], default="n")
+    if not answer or answer.lower() not in ("y", "yes"):
+        return
+
+    # --------------------------------------------------------- strip
+    def _remove_field(fm_str: str, field: str) -> str:
+        """Return frontmatter string with *field* and any continuation lines removed."""
+        lines = fm_str.splitlines()
+        out: list[str] = []
+        skip_indent = False
+        prefix = f"{field}:"
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(prefix) and (
+                len(stripped) == len(prefix) or stripped[len(prefix)] in (" ", "\t")
+            ):
+                # Check if this is a block scalar (continuation lines follow)
+                rest = stripped[len(prefix):].strip()
+                skip_indent = rest in (">-", ">", "|", "|-")
+                continue
+            if skip_indent:
+                if line and (line[0] == " " or line[0] == "\t"):
+                    continue
+                else:
+                    skip_indent = False
+            out.append(line)
+        return "\n".join(out)
+
+    for ent_dir in has_field_dirs:
+        md_file = ent_dir / "index.md"
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"  cannot read {md_file}: {exc}")
+            continue
+        fm_str, body = split_frontmatter(text)
+        if fm_str is None:
+            continue
+        new_fm = _remove_field(fm_str, field)
+        write_frontmatter_md(md_file, new_fm, body)
+        print(f"  updated {md_file.relative_to(project)}")
+
+
 def _cmd_tree(cwd: Path, content: Path, args: list[str]) -> None:
     base = cwd
     depth = 3
@@ -1668,6 +1788,7 @@ def _cmd_help() -> None:
   info                                  show name and summary for entities in current directory
   edit <path>                           edit entity or collection frontmatter
   check <path>                          list entities missing a world property
+  strip <path>                          remove a property from all entities that have it
   cd <path>                             change directory (relative or from content root)
   cd ..                                 go up one level
   cd                                    go back to content root
@@ -1754,6 +1875,8 @@ def run_shell(project: Path) -> None:
             _cmd_edit(project, cwd, content, args)
         elif cmd == "check":
             _cmd_check(project, cwd, content, args)
+        elif cmd == "strip":
+            _cmd_strip(project, cwd, content, args)
         elif cmd == "tree":
             _cmd_tree(cwd, content, args)
         elif cmd == "cd":
