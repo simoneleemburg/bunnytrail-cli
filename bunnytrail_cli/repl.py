@@ -69,7 +69,7 @@ TOP_LEVEL_COMMANDS = [
     "quit",
 ]
 
-ADD_SUBCOMMANDS = ["entity", "collection", "kind"]
+ADD_SUBCOMMANDS = ["entity", "collection", "kind", "ontology"]
 
 # ANSI colour helpers
 _GREEN  = "\033[1;32m"
@@ -436,6 +436,9 @@ class _ShellCompleter(Completer):
                     if len(tokens) == 3:
                         yield from _yield_paths(fragment, self._content, frag_start)
                 elif sub == "kind":
+                    if len(tokens) == 3:
+                        yield from _yield_paths(fragment, self._kinds, frag_start)
+                elif sub == "ontology":
                     if len(tokens) == 3:
                         yield from _yield_paths(fragment, self._kinds, frag_start)
 
@@ -1350,7 +1353,7 @@ def _cmd_add(
 
     if sub not in ADD_SUBCOMMANDS:
         print(f"  unknown add subcommand: {sub!r}")
-        print("  usage: add entity|collection|kind ...")
+        print("  usage: add entity|collection|kind|ontology ...")
         return None
 
     if sub == "entity":
@@ -1578,6 +1581,40 @@ def _cmd_add(
         md_file.write_text(content_lines, encoding="utf-8")
         print(f"  created {md_file.relative_to(project)}")
         return
+
+    if sub == "ontology":
+        path  = args[1] if len(args) > 1 else None
+        title = " ".join(args[2:]) if len(args) > 2 else None
+
+        if path is None:
+            path = _ask("path (under content_meta/kinds/)", complete_from=kinds)
+            if not path:
+                return None
+        path = path.rstrip("/")
+
+        if title is None:
+            leaf = path.rsplit("/", 1)[-1] if "/" in path else path
+            auto_title = _slug_to_title(leaf)
+            title = _ask("title (optional)", default=auto_title)
+            if title is None:
+                return None
+
+        description = _ask("description (optional)")
+
+        ontology_dir = kinds / path
+        yaml_file = ontology_dir / "_ontology.yaml"
+        if yaml_file.exists():
+            print(f"  already exists: {yaml_file.relative_to(project)}")
+            return None
+        ontology_dir.mkdir(parents=True, exist_ok=True)
+        lines_out: list[str] = []
+        if title:
+            lines_out.append(f"title: {title}")
+        if description:
+            lines_out.append(f"description: {description}")
+        yaml_file.write_text(("\n".join(lines_out) + "\n") if lines_out else "", encoding="utf-8")
+        print(f"  created {yaml_file.relative_to(project)}")
+        return None
 
 
 def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str]) -> None:

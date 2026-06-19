@@ -158,6 +158,16 @@ def is_kind_folder(path: Path) -> bool:
     return (path / "_kind.yaml").is_file()
 
 
+def is_ontology_folder(path: Path) -> bool:
+    """An ontology container has ``_ontology.yaml`` but no ``_kind.yaml``.
+
+    Applies at any depth under ``content_meta/kinds/``, though the
+    ONTOLOGY.md spec allows only one level of nesting (ontologies cannot
+    be nested inside other ontologies).
+    """
+    return (path / "_ontology.yaml").is_file() and not (path / "_kind.yaml").is_file()
+
+
 def is_collection_folder(path: Path) -> bool:
     """A collection folder carries a ``_collection.md`` marker."""
     return (path / "_collection.md").is_file()
@@ -180,13 +190,21 @@ def list_tree(base: Path, indent: int = 0, max_depth: int = 4) -> list[str]:
 
 
 def list_kinds_tree(base: Path, indent: int = 0) -> list[str]:
-    """Return a simple text tree of the kinds hierarchy."""
+    """Return a simple text tree of the kinds hierarchy.
+
+    Legend: [K] kind folder  [O] ontology container  [ ] plain folder
+    """
     lines: list[str] = []
     prefix = "  " * indent
     for child in sorted(base.iterdir()):
         if child.name.startswith(".") or not child.is_dir():
             continue
-        marker = "[K]" if is_kind_folder(child) else "[ ]"
+        if is_kind_folder(child):
+            marker = "[K]"
+        elif is_ontology_folder(child):
+            marker = "[O]"
+        else:
+            marker = "[ ]"
         lines.append(f"{prefix}{marker} {child.name}/")
         lines.extend(list_kinds_tree(child, indent + 1))
     return lines
@@ -207,6 +225,12 @@ def iter_kind_md_files(kinds: Path):
     """Yield every ``_kind.yaml`` under the kinds tree."""
     for md_file in kinds.rglob("_kind.yaml"):
         yield md_file
+
+
+def iter_ontology_yaml_files(kinds: Path):
+    """Yield every ``_ontology.yaml`` under the kinds tree (including root)."""
+    for yaml_file in kinds.rglob("_ontology.yaml"):
+        yield yaml_file
 
 
 def iter_collection_md_files(content: Path):
@@ -984,7 +1008,12 @@ _WORLD_MD_PATH = "content_meta/world.md"
 
 @dataclass
 class RelationDef:
-    """One relation kind from ``world.md``."""
+    """One relation kind, loaded from an ``_ontology.yaml`` file.
+
+    ``slug`` is the **full** prefixed id (e.g. ``cultural/member-of``) as
+    registered in the relation registry.  For relations from the root
+    ontology the slug is bare (no prefix).
+    """
     slug: str
     out_label: str = ""
     in_label: str = ""
@@ -994,26 +1023,61 @@ class RelationDef:
 
 @dataclass
 class PropertyDef:
-    """One property from ``world.md``."""
+    """One property, loaded from a ``_kind.yaml`` ``properties:`` block.
+
+    ``slug`` is the bare property id (e.g. ``gender``).
+    ``declaring_kind`` is the leaf slug of the kind whose ``_kind.yaml``
+    declared it; empty string means it came from the old ``world.md``
+    style (treated as unrestricted).
+    """
     slug: str
     label: str = ""
-    allowed_kinds: list[str] = field(default_factory=list)  # empty = unrestricted
-    values: list[str] = field(default_factory=list)          # empty = free text
+    declaring_kind: str = ""     # leaf slug of the declaring kind; "" = unrestricted
+    values: list[str] = field(default_factory=list)   # empty = free text
 
 
 @dataclass
 class WorldConfig:
-    """Parsed ``relations:`` and ``properties:`` from ``content_meta/world.md``."""
+    """Relations and properties loaded from the new ontology schema.
+
+    Relations come from ``_ontology.yaml`` files under
+    ``content_meta/kinds/``; properties come from the ``properties:``
+    block inside each kind's ``_kind.yaml``.
+
+    The two strictness flags from ``content_meta/world.md`` are also
+    stored here for completeness.
+    """
     relations: list[RelationDef] = field(default_factory=list)
     properties: list[PropertyDef] = field(default_factory=list)
+    allow_undefined_relations: bool = False
+    allow_undefined_properties: bool = False
 
     def applicable_relations(self, kind_id: str) -> list[RelationDef]:
         """Relations whose ``domain`` includes *kind_id* or is unrestricted."""
         return [r for r in self.relations if not r.domain or kind_id in r.domain]
 
     def applicable_properties(self, kind_id: str) -> list[PropertyDef]:
-        """Properties whose ``allowed_kinds`` includes *kind_id* or is unrestricted."""
-        return [p for p in self.properties if not p.allowed_kinds or kind_id in p.allowed_kinds]
+        """Properties that apply to *kind_id*.
+
+        Per the new ontology spec, a property declared on a kind applies
+        to that kind and all its descendants via the kind hierarchy.  The
+        CLI does not have access to the full kind hierarchy graph, so this
+        method uses a conservative approximation:
+
+          * Properties with no ``declaring_kind`` (loaded from the old
+            ``world.md`` style or from a root-level kind) are always
+            included.
+          * Properties where ``declaring_kind == kind_id`` are always
+            included.
+          * When *kind_id* is empty (unknown), all properties are returned
+            so callers can show the full set for completion purposes.
+        """
+        if not kind_id:
+            return list(self.properties)
+        return [
+            p for p in self.properties
+            if not p.declaring_kind or p.declaring_kind == kind_id
+        ]
 
 
 def _as_str_list(val: object) -> list[str]:
@@ -1025,60 +1089,173 @@ def _as_str_list(val: object) -> list[str]:
     return [str(val)]
 
 
-def load_world_config(project: Path) -> WorldConfig:
-    """Parse ``content_meta/world.md`` and return a :class:`WorldConfig`.
+def _load_ontology_relations(
+    ontology_yaml: Path,
+    kinds_root_path: Path,
+) -> list[RelationDef]:
+    """Load relations from a single ``_ontology.yaml`` file.
 
-    Returns an empty config if the file is missing or has no frontmatter.
-    Uses PyYAML to parse the frontmatter block so inline lists and quoted
-    strings are handled correctly.
+    The relation id is constructed by prepending the ontology folder name
+    to the bare slug — unless the file lives directly at the root of
+    ``content_meta/kinds/`` (root ontology), in which case slugs are bare.
+
+    Returns an empty list on any parse error.
     """
-    world_md = project / _WORLD_MD_PATH
-    if not world_md.is_file():
-        return WorldConfig()
-
-    text = world_md.read_text(encoding="utf-8")
-    fm, _ = split_frontmatter(text)
-    if fm is None:
-        return WorldConfig()
-
     try:
-        data = yaml.safe_load(fm)
-    except yaml.YAMLError:
-        return WorldConfig()
-
+        text = ontology_yaml.read_text(encoding="utf-8")
+        data = yaml.safe_load(text)
+    except (OSError, yaml.YAMLError):
+        return []
     if not isinstance(data, dict):
-        return WorldConfig()
+        return []
 
-    # ── relations ──────────────────────────────────────────────────────────
+    # Determine the prefix: the folder name when this is a named ontology,
+    # or "" when it sits directly at the kinds root.
+    folder = ontology_yaml.parent
+    if folder.resolve() == kinds_root_path.resolve():
+        prefix = ""
+    else:
+        prefix = folder.name + "/"
+
     relations: list[RelationDef] = []
     raw_rels = data.get("relations") or {}
     if isinstance(raw_rels, dict):
-        for slug, defn in raw_rels.items():
+        for bare_slug, defn in raw_rels.items():
             if not isinstance(defn, dict):
                 defn = {}
+            full_slug = prefix + str(bare_slug)
             relations.append(RelationDef(
-                slug=str(slug),
+                slug=full_slug,
                 out_label=str(defn.get("outLabel") or ""),
                 in_label=str(defn.get("inLabel") or ""),
                 domain=_as_str_list(defn.get("domain")),
                 codomain=_as_str_list(defn.get("codomain")),
             ))
+    return relations
 
-    # ── properties ─────────────────────────────────────────────────────────
-    properties: list[PropertyDef] = []
+
+def _load_kind_properties(kind_yaml: Path) -> list[PropertyDef]:
+    """Load properties from the ``properties:`` block of a ``_kind.yaml`` file.
+
+    ``declaring_kind`` is set to the folder's leaf slug so
+    :meth:`WorldConfig.applicable_properties` can filter by kind.
+
+    Returns an empty list on any parse error or missing ``properties:`` key.
+    """
+    try:
+        text = kind_yaml.read_text(encoding="utf-8")
+        data = yaml.safe_load(text)
+    except (OSError, yaml.YAMLError):
+        return []
+    if not isinstance(data, dict):
+        return []
+
     raw_props = data.get("properties") or {}
-    if isinstance(raw_props, dict):
-        for slug, defn in raw_props.items():
-            if not isinstance(defn, dict):
-                defn = {}
-            properties.append(PropertyDef(
-                slug=str(slug),
-                label=str(defn.get("label") or slug),
-                allowed_kinds=_as_str_list(defn.get("allowedKinds")),
-                values=_as_str_list(defn.get("values")),
-            ))
+    if not isinstance(raw_props, dict):
+        return []
 
-    return WorldConfig(relations=relations, properties=properties)
+    declaring_kind = kind_yaml.parent.name
+    props: list[PropertyDef] = []
+    for slug, defn in raw_props.items():
+        if not isinstance(defn, dict):
+            defn = {}
+        props.append(PropertyDef(
+            slug=str(slug),
+            label=str(defn.get("label") or slug),
+            declaring_kind=declaring_kind,
+            values=_as_str_list(defn.get("values")),
+        ))
+    return props
+
+
+def load_world_config(project: Path) -> WorldConfig:
+    """Build a :class:`WorldConfig` from the new ontology schema.
+
+    Sources:
+      * ``content_meta/kinds/**/_ontology.yaml`` — one file per named
+        ontology (or the root ``content_meta/kinds/_ontology.yaml`` for
+        global relations).  Relation slugs are prefixed with the ontology
+        folder name; root-ontology slugs remain bare.
+      * ``content_meta/kinds/**/_kind.yaml`` — ``properties:`` block on
+        each kind.
+      * ``content_meta/world.md`` — only the two strictness booleans
+        ``allowUndefinedRelations`` and ``allowUndefinedProperties``.
+
+    Falls back gracefully: missing files, empty files, and YAML errors
+    are all tolerated (the corresponding registry is simply empty).
+
+    Backward compatibility: if ``content_meta/world.md`` still carries a
+    ``relations:`` or ``properties:`` mapping (old schema), those are
+    loaded too and merged in so existing projects keep working until they
+    migrate to the new layout.
+    """
+    kinds = kinds_root(project)
+    allow_undef_rels = False
+    allow_undef_props = False
+    relations: list[RelationDef] = []
+    properties: list[PropertyDef] = []
+
+    # ── relations from _ontology.yaml files ────────────────────────────────
+    if kinds.is_dir():
+        for ontology_yaml in sorted(kinds.rglob("_ontology.yaml")):
+            relations.extend(_load_ontology_relations(ontology_yaml, kinds))
+
+    # ── properties from _kind.yaml files ───────────────────────────────────
+    if kinds.is_dir():
+        for kind_yaml in sorted(kinds.rglob("_kind.yaml")):
+            properties.extend(_load_kind_properties(kind_yaml))
+
+    # ── world.md — strictness flags + backward-compat registry ────────────
+    world_md = project / _WORLD_MD_PATH
+    if world_md.is_file():
+        try:
+            text = world_md.read_text(encoding="utf-8")
+            fm, _ = split_frontmatter(text)
+            if fm is not None:
+                data = yaml.safe_load(fm)
+            else:
+                # world.md may be plain YAML without fences (old style)
+                data = yaml.safe_load(text)
+        except yaml.YAMLError:
+            data = None
+
+        if isinstance(data, dict):
+            allow_undef_rels = bool(data.get("allowUndefinedRelations", False))
+            allow_undef_props = bool(data.get("allowUndefinedProperties", False))
+
+            # Backward compatibility: relations block in world.md
+            raw_rels = data.get("relations") or {}
+            if isinstance(raw_rels, dict):
+                for slug, defn in raw_rels.items():
+                    if not isinstance(defn, dict):
+                        defn = {}
+                    relations.append(RelationDef(
+                        slug=str(slug),
+                        out_label=str(defn.get("outLabel") or ""),
+                        in_label=str(defn.get("inLabel") or ""),
+                        domain=_as_str_list(defn.get("domain")),
+                        codomain=_as_str_list(defn.get("codomain")),
+                    ))
+
+            # Backward compatibility: properties block in world.md
+            raw_props = data.get("properties") or {}
+            if isinstance(raw_props, dict):
+                for slug, defn in raw_props.items():
+                    if not isinstance(defn, dict):
+                        defn = {}
+                    properties.append(PropertyDef(
+                        slug=str(slug),
+                        label=str(defn.get("label") or slug),
+                        declaring_kind="",    # old style — unrestricted
+                        values=_as_str_list(defn.get("values")),
+                    ))
+
+    return WorldConfig(
+        relations=relations,
+        properties=properties,
+        allow_undefined_relations=allow_undef_rels,
+        allow_undefined_properties=allow_undef_props,
+    )
 
 
 @dataclass
@@ -1965,9 +2142,9 @@ def read_entity_display_name(entity_dir: Path) -> str:
 
 
 def read_kind_display_names(kind_dir: Path) -> tuple[str, str, str]:
-    """Return ``(singular, plural, definition)`` from ``_kind.yaml``.
+    """Return ``(singular, plural, description)`` from ``_kind.yaml``.
 
-    Returns ``("", "", "")`` if the file is absent.  ``definition`` is
+    Returns ``("", "", "")`` if the file is absent.  ``description`` is
     the optional prose description of the kind; it may be an empty string
     when the field is not present in the file.
     """
@@ -1979,7 +2156,7 @@ def read_kind_display_names(kind_dir: Path) -> tuple[str, str, str]:
     return (
         _parse_yaml_field(lines, "singular"),
         _parse_yaml_field(lines, "plural"),
-        _parse_yaml_field(lines, "definition"),
+        _parse_yaml_field(lines, "description"),
     )
 
 
@@ -2088,7 +2265,7 @@ def plan_rename(
         # Compute display-name renames (singular / plural) and a label-
         # rewrite map for use inside [[kinds/<slug>|Label]] wikilinks.
         # ------------------------------------------------------------------
-        old_singular, old_plural, old_definition = read_kind_display_names(old_dir)
+        old_singular, old_plural, old_description = read_kind_display_names(old_dir)
         if new_display_names:
             new_singular = new_display_names.get("singular", old_singular)
             new_plural = new_display_names.get("plural", old_plural)
@@ -2157,16 +2334,16 @@ def plan_rename(
                     refs.append(MoveRef(md_file, i, line, new_line))
 
         # Frontmatter edits on the renamed kind's own _kind.yaml.
-        if display_renames or (new_display_names and "definition" in new_display_names):
+        if display_renames or (new_display_names and "description" in new_display_names):
             kind_yaml = old_dir / "_kind.yaml"
             if kind_yaml.is_file():
-                new_definition = new_display_names.get("definition", old_definition) if new_display_names else old_definition
+                new_description = new_display_names.get("description", old_description) if new_display_names else old_description
                 fm_refs = _yaml_field_edits(
                     kind_yaml,
                     {"singular": new_display_names.get("singular", old_singular) if new_display_names else old_singular,
                      "plural":   new_display_names.get("plural",   old_plural)   if new_display_names else old_plural,
-                     "definition": new_definition},
-                    current={"singular": old_singular, "plural": old_plural, "definition": old_definition},
+                     "description": new_description},
+                    current={"singular": old_singular, "plural": old_plural, "description": old_description},
                 )
                 refs.extend(fm_refs)
 

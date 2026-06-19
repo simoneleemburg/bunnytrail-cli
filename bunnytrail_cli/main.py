@@ -241,7 +241,7 @@ def add_collection(
 @click.argument("path")
 @click.argument("singular")
 @click.argument("plural", required=False, default="")
-@click.option("--definition", default="", help="Short definition of the kind.")
+@click.option("--description", default="", help="Short description of the kind.")
 @click.option("--force", is_flag=True, help="Overwrite existing _kind.yaml.")
 @click.pass_context
 def add_kind(
@@ -249,7 +249,7 @@ def add_kind(
     path: str,
     singular: str,
     plural: str,
-    definition: str,
+    description: str,
     force: bool,
 ) -> None:
     """Create a new kind stub at content_meta/kinds/PATH.
@@ -275,10 +275,67 @@ def add_kind(
 
     plural_val = plural or f"{singular}s"
     lines = [f"singular: {singular}", f"plural: {plural_val}"]
-    if definition:
-        lines.append(f"definition: {definition}")
+    if description:
+        lines.append(f"description: {description}")
     md_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     click.echo(f"Created kind stub: {md_file.relative_to(root)}")
+
+
+@add.command("ontology")
+@click.argument("path")
+@click.argument("title", required=False, default="")
+@click.option("--description", default="", help="Short editorial note.")
+@click.option("--force", is_flag=True, help="Overwrite existing _ontology.yaml.")
+@click.pass_context
+def add_ontology(
+    ctx: click.Context,
+    path: str,
+    title: str,
+    description: str,
+    force: bool,
+) -> None:
+    """Create a new ontology container at content_meta/kinds/PATH.
+
+    PATH is relative to content_meta/kinds/, e.g. 'cultural'.
+    TITLE is the optional human-readable display name (defaults to
+    title-casing the folder name).
+
+    Writes a ``_ontology.yaml`` plain YAML file that marks the folder as
+    an ontology container.  Kind folders nested inside it inherit this
+    ontology as their group.  Relations declared in the ``relations:``
+    block will be prefixed with the folder name in the registry
+    (e.g. a relation 'member-of' in 'cultural/_ontology.yaml' is
+    registered as 'cultural/member-of').
+
+    To add a relation to the new ontology, edit the generated file and
+    add a ``relations:`` block following the schema in ONTOLOGY.md.
+    """
+    root: Path = ctx.obj["root"]
+    ontology_dir = kinds_root(root) / path
+    yaml_file = ontology_dir / "_ontology.yaml"
+
+    if yaml_file.exists() and not force:
+        click.echo(
+            f"Error: '{yaml_file}' already exists.  Use --force to overwrite.",
+            err=True,
+        )
+        sys.exit(1)
+
+    ontology_dir.mkdir(parents=True, exist_ok=True)
+
+    lines: list[str] = []
+    if title:
+        lines.append(f"title: {title}")
+    elif path:
+        # Generate a title-cased title from the leaf folder name as default.
+        leaf = path.rstrip("/").rsplit("/", 1)[-1]
+        auto_title = " ".join(w.capitalize() for w in leaf.replace("_", "-").split("-") if w)
+        lines.append(f"title: {auto_title}")
+    if description:
+        lines.append(f"description: {description}")
+
+    yaml_file.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+    click.echo(f"Created ontology container: {yaml_file.relative_to(root)}")
 
 
 # ---------------------------------------------------------------------------
