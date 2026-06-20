@@ -31,10 +31,10 @@ from .helpers import (
     is_entity_folder,
     iter_entity_md_files,
     iter_kind_md_files,
+    kind_has_class_constraint,
     kinds_root,
     list_kinds_tree,
     list_tree,
-    load_bt_config,
     load_world_config,
     plan_crosslink,
     plan_crosslink_folder,
@@ -685,7 +685,6 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
     ) -> bool:
         """Prompt for one field, patch it in place, write, return False on cancel."""
         kinds = kinds_root(project)
-        bt_cfg = load_bt_config(project)
         world_cfg = load_world_config(project)
         get = lambda f: _parse_yaml_field(fm_lines, f)
 
@@ -780,7 +779,6 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
         return
 
     kinds = kinds_root(project)
-    bt_cfg = load_bt_config(project)
     world_cfg = load_world_config(project)
 
     # ----------------------------------------------------------- determine scope
@@ -891,7 +889,7 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
 
             entity_class: str = get("class")
             old_class = get("class")
-            if old_class or kind_id in bt_cfg.add.class_for_kinds:
+            if old_class or kind_has_class_constraint(project, kind_id):
                 val = _ask("class", complete_from_cwd=(cwd, content), default=old_class)
                 if val is None:
                     return
@@ -1410,13 +1408,12 @@ def _cmd_add(
 
         summary = _ask("summary (optional)")  # empty → omitted
 
-        # Load world schema and bt config once for all prompts below
-        bt_cfg = load_bt_config(project)
+        # Load world schema once for all prompts below
         world_cfg = load_world_config(project)
 
-        # Ask for class: if this kind is configured to require one
+        # Ask for class: if this kind declares a class constraint in its _kind.yaml
         entity_class: "str | None" = None
-        if kind_id in bt_cfg.add.class_for_kinds:
+        if kind_has_class_constraint(project, kind_id):
             entity_class = _ask(
                 "class",
                 complete_from_cwd=(cwd, content),

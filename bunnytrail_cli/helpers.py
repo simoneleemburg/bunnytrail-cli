@@ -890,11 +890,6 @@ def execute_move(plan: MovePlan) -> None:
 #                are surfaced after a run so the user can decide whether
 #                to demote them to `never:`.
 #
-#   add:         Behaviour of the `bt add` command.
-#     class_for_kinds:
-#                Flat list of kind slugs for which `bt add entity` will
-#                interactively prompt for a ``class:`` entity-path field.
-#
 # Both crosslink lists are matched case-sensitively against the same
 # strings the crosslinker would otherwise turn into wikilinks (a kind's
 # singular/plural, or an entity's display name).
@@ -909,16 +904,9 @@ class CrosslinkConfig:
 
 
 @dataclass
-class AddConfig:
-    """Parsed ``add:`` section of ``content_meta/bt.yml``."""
-    class_for_kinds: set[str] = field(default_factory=set)
-
-
-@dataclass
 class BtConfig:
     """Full parsed contents of ``content_meta/bt.yml``."""
     crosslink: CrosslinkConfig = field(default_factory=CrosslinkConfig)
-    add: AddConfig = field(default_factory=AddConfig)
 
 
 def load_bt_config(project: Path) -> BtConfig:
@@ -936,12 +924,11 @@ def load_bt_config(project: Path) -> BtConfig:
 
     cl_never: set[str] = set()
     cl_warn: set[str] = set()
-    add_class_for_kinds: set[str] = set()
 
     # Simple single-pass line parser.
     # State: which top-level section and which sub-key we are inside.
-    section: "str | None" = None          # "crosslink" | "add" | None
-    sub_key: "str | None" = None          # e.g. "never", "warn", "class_for_kinds"
+    section: "str | None" = None          # "crosslink" | None
+    sub_key: "str | None" = None          # e.g. "never", "warn"
 
     for raw in text.splitlines():
         line = raw.rstrip()
@@ -952,7 +939,7 @@ def load_bt_config(project: Path) -> BtConfig:
         if line[0] not in (" ", "\t"):
             key, _, _ = line.partition(":")
             key = key.strip()
-            section = key if key in ("crosslink", "add") else None
+            section = key if key in ("crosslink",) else None
             sub_key = None
             continue
 
@@ -967,8 +954,6 @@ def load_bt_config(project: Path) -> BtConfig:
             key, _, _ = stripped.partition(":")
             key = key.strip()
             if section == "crosslink" and key in ("never", "warn"):
-                sub_key = key
-            elif section == "add" and key == "class_for_kinds":
                 sub_key = key
             else:
                 sub_key = None
@@ -985,12 +970,9 @@ def load_bt_config(project: Path) -> BtConfig:
                 cl_never.add(value)
             elif sub_key == "warn":
                 cl_warn.add(value)
-        elif section == "add" and sub_key == "class_for_kinds":
-            add_class_for_kinds.add(value)
 
     return BtConfig(
         crosslink=CrosslinkConfig(never=cl_never, warn=cl_warn),
-        add=AddConfig(class_for_kinds=add_class_for_kinds),
     )
 
 
@@ -1013,12 +995,21 @@ class RelationDef:
     ``slug`` is the **full** prefixed id (e.g. ``cultural/member-of``) as
     registered in the relation registry.  For relations from the root
     ontology the slug is bare (no prefix).
+
+    ``qualifier_required`` is True when the ontology declares
+    ``qualifier: required`` on this relation — every instance must carry a
+    ``qualifier:`` entity-path field.
+
+    ``qualifier_domain`` is the list of kind slugs that the qualifier entity
+    must belong to (from ``qualifierDomain:``); empty means no restriction.
     """
     slug: str
     out_label: str = ""
     in_label: str = ""
-    domain: list[str] = field(default_factory=list)    # kind slugs; empty = unrestricted
-    codomain: list[str] = field(default_factory=list)  # kind slugs; empty = unrestricted
+    domain: list[str] = field(default_factory=list)           # kind slugs; empty = unrestricted
+    codomain: list[str] = field(default_factory=list)         # kind slugs; empty = unrestricted
+    qualifier_required: bool = False
+    qualifier_domain: list[str] = field(default_factory=list) # kind slugs; empty = unrestricted
 
 
 @dataclass
@@ -1130,6 +1121,8 @@ def _load_ontology_relations(
                 in_label=str(defn.get("inLabel") or ""),
                 domain=_as_str_list(defn.get("domain")),
                 codomain=_as_str_list(defn.get("codomain")),
+                qualifier_required=(defn.get("qualifier") == "required"),
+                qualifier_domain=_as_str_list(defn.get("qualifierDomain")),
             ))
     return relations
 
@@ -1166,6 +1159,32 @@ def _load_kind_properties(kind_yaml: Path) -> list[PropertyDef]:
             values=_as_str_list(defn.get("values")),
         ))
     return props
+
+
+def kind_has_class_constraint(project: Path, kind_slug: str) -> bool:
+    """Return True if *kind_slug*'s ``_kind.yaml`` declares a ``class:`` field.
+
+    The ``class:`` field on a kind constrains which class entities may be
+    assigned to entities of that kind (see ONTOLOGY.md).  When it is present,
+    ``bt add entity`` should interactively prompt for a ``class:`` value.
+
+    Searches every ``_kind.yaml`` under ``content_meta/kinds/`` whose parent
+    folder name matches *kind_slug*.  Returns False on any read/parse error or
+    when no matching kind is found.
+    """
+    kinds = kinds_root(project)
+    if not kinds.is_dir():
+        return False
+    for kind_yaml in kinds.rglob("_kind.yaml"):
+        if kind_yaml.parent.name != kind_slug:
+            continue
+        try:
+            data = yaml.safe_load(kind_yaml.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(data, dict) and data.get("class"):
+            return True
+    return False
 
 
 def load_world_config(project: Path) -> WorldConfig:
