@@ -2333,6 +2333,22 @@ def plan_rename(
                 if changed and new_line != line:
                     refs.append(MoveRef(md_file, i, line, new_line))
 
+        # 4. domain: / codomain: / qualifierDomain: lists in _ontology.yaml files.
+        #    These are inline YAML lists, e.g.  ``domain: [character, role]``.
+        #    We match the old slug as a whole token inside the bracketed list.
+        ontology_domain_re = re.compile(
+            r"^(?P<prefix>\s*(?:domain|codomain|qualifierDomain):\s*\[(?:[^\]]*?,\s*)?)"
+            r"(?P<slug>" + re.escape(old_slug) + r")"
+            r"(?P<suffix>(?:\s*,\s*[^\]]*?)?\].*)"
+        )
+        for ontology_yaml in iter_ontology_yaml_files(kinds):
+            lines = ontology_yaml.read_text(encoding="utf-8").splitlines()
+            for i, line in enumerate(lines, start=1):
+                m = ontology_domain_re.match(line)
+                if m:
+                    new_line = m.group("prefix") + new_slug + m.group("suffix")
+                    refs.append(MoveRef(ontology_yaml, i, line, new_line))
+
         # Frontmatter edits on the renamed kind's own _kind.yaml.
         if display_renames or (new_display_names and "description" in new_display_names):
             kind_yaml = old_dir / "_kind.yaml"

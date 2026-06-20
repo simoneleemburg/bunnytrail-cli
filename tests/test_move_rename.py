@@ -743,3 +743,113 @@ def test_move_collection_rewrites_class_field(project: Path) -> None:
     execute_move(plan)
     fm = _read_frontmatter(project, "aurethia/people/duskmere")
     assert "class: aurethia/people/bayurinda/nuunlau" in fm, fm
+
+
+# ---------------------------------------------------------------------------
+# kind rename — domain: / codomain: / qualifierDomain: in _ontology.yaml
+# ---------------------------------------------------------------------------
+
+def _write_ontology(project: Path, ontology_path: str, text: str) -> Path:
+    """Write an _ontology.yaml under content_meta/kinds/<ontology_path>/."""
+    yaml_file = project / "content_meta" / "kinds" / ontology_path / "_ontology.yaml"
+    yaml_file.parent.mkdir(parents=True, exist_ok=True)
+    yaml_file.write_text(text, encoding="utf-8")
+    return yaml_file
+
+
+def _read_ontology(project: Path, ontology_path: str) -> str:
+    yaml_file = project / "content_meta" / "kinds" / ontology_path / "_ontology.yaml"
+    return yaml_file.read_text(encoding="utf-8")
+
+
+def test_kind_rename_updates_domain_in_ontology(project: Path) -> None:
+    """Renaming a kind slug rewrites it in domain: lists of _ontology.yaml files."""
+    _write_ontology(project, "cultural", (
+        "relations:\n"
+        "  member-of:\n"
+        "    outLabel: Member of\n"
+        "    inLabel: Members\n"
+        "    domain: [being]\n"
+        "    codomain: [place]\n"
+    ))
+    plan = plan_rename(project, "being/human", "person")
+    assert plan.error == ""
+    execute_rename(plan)
+    text = _read_ontology(project, "cultural")
+    # 'being' is unchanged — we renamed 'human', not 'being'
+    assert "domain: [being]" in text
+
+
+def test_kind_rename_updates_codomain_in_ontology(project: Path) -> None:
+    """Renaming a kind slug rewrites it in codomain: lists of _ontology.yaml files."""
+    _write_ontology(project, "cultural", (
+        "relations:\n"
+        "  member-of:\n"
+        "    outLabel: Member of\n"
+        "    inLabel: Members\n"
+        "    domain: [being]\n"
+        "    codomain: [human, place]\n"
+    ))
+    plan = plan_rename(project, "being/human", "person")
+    assert plan.error == ""
+    execute_rename(plan)
+    text = _read_ontology(project, "cultural")
+    assert "codomain: [person, place]" in text
+    assert "human" not in text
+
+
+def test_kind_rename_updates_qualifier_domain_in_ontology(project: Path) -> None:
+    """Renaming a kind slug rewrites it in qualifierDomain: lists."""
+    _write_ontology(project, "natural", (
+        "relations:\n"
+        "  originated-on:\n"
+        "    outLabel: Originated on\n"
+        "    inLabel: Origin of\n"
+        "    qualifier: required\n"
+        "    qualifierDomain: [human]\n"
+        "    domain: [being]\n"
+        "    codomain: [place]\n"
+    ))
+    plan = plan_rename(project, "being/human", "person")
+    assert plan.error == ""
+    execute_rename(plan)
+    text = _read_ontology(project, "natural")
+    assert "qualifierDomain: [person]" in text
+    assert "human" not in text
+
+
+def test_kind_rename_updates_slug_among_multiple_in_list(project: Path) -> None:
+    """When a list has multiple slugs, only the renamed one is changed."""
+    _write_ontology(project, "cultural", (
+        "relations:\n"
+        "  member-of:\n"
+        "    outLabel: Member of\n"
+        "    inLabel: Members\n"
+        "    domain: [being]\n"
+        "    codomain: [human, place, institution]\n"
+    ))
+    plan = plan_rename(project, "being/human", "person")
+    assert plan.error == ""
+    execute_rename(plan)
+    text = _read_ontology(project, "cultural")
+    assert "codomain: [person, place, institution]" in text
+
+
+def test_kind_rename_does_not_rewrite_partial_slug_match_in_ontology(project: Path) -> None:
+    """A slug that is a substring of another slug is not rewritten."""
+    _write_ontology(project, "cultural", (
+        "relations:\n"
+        "  member-of:\n"
+        "    outLabel: Member of\n"
+        "    inLabel: Members\n"
+        "    domain: [being]\n"
+        "    codomain: [humanoid, human-culture]\n"
+    ))
+    plan = plan_rename(project, "being/human", "person")
+    assert plan.error == ""
+    execute_rename(plan)
+    text = _read_ontology(project, "cultural")
+    # Neither 'humanoid' nor 'human-culture' is the slug 'human'
+    assert "humanoid" in text
+    assert "human-culture" in text
+    assert "personoid" not in text
