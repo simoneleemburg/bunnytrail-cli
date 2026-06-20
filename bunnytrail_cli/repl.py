@@ -374,12 +374,17 @@ class _ShellCompleter(Completer):
     Top-level completer for the main REPL prompt.  Parses the buffer to figure
     out which command and which positional argument is being completed, then
     delegates to path/word completion.
+
+    *cwd* is mutable — the shell loop updates it via ``shell_completer.cwd = ...``
+    after every ``cd`` so that path completions are always relative to the
+    current virtual directory.
     """
 
     def __init__(self, project: Path) -> None:
         self._project = project
         self._content = content_root(project)
         self._kinds = kinds_root(project)
+        self.cwd: Path = self._content  # updated by run_shell after cd
 
     def get_completions(
         self, document: Document, complete_event
@@ -444,7 +449,7 @@ class _ShellCompleter(Completer):
 
         elif cmd == "move":
             has_kind_flag = "--kind" in tokens
-            base = self._kinds if has_kind_flag else self._content
+            base = self._kinds if has_kind_flag else self.cwd
             pos_tokens = [t for t in tokens[1:] if not t.startswith("-")]
             pos_count = len(pos_tokens) + (1 if trailing_space else 0)
             if pos_count in (1, 2):
@@ -452,12 +457,12 @@ class _ShellCompleter(Completer):
 
         elif cmd == "rename":
             if len(tokens) == 2:
-                yield from _yield_paths(fragment, self._content, frag_start)
+                yield from _yield_paths(fragment, self.cwd, frag_start)
                 yield from _yield_paths(fragment, self._kinds, frag_start)
 
         elif cmd == "crosslink":
             if len(tokens) in (2, 3):
-                yield from _yield_paths(fragment, self._content, frag_start)
+                yield from _yield_paths(fragment, self.cwd, frag_start)
 
 
 def _yield_words(
@@ -1504,8 +1509,14 @@ def _cmd_add(
         return None
 
     if sub == "collection":
-        slug  = args[1] if len(args) > 1 else None
-        title = " ".join(args[2:]) if len(args) > 2 else None
+        path  = args[1] if len(args) > 1 else None
+        slug  = args[2] if len(args) > 2 else None
+        title = " ".join(args[3:]) if len(args) > 3 else None
+
+        if path is None:
+            path = _ask("path", complete_from_cwd=(cwd, content), default=".")
+            if path is None:
+                return None
 
         if slug is None:
             slug = _ask("slug")
@@ -1519,7 +1530,21 @@ def _cmd_add(
 
         description = _ask("description (optional)")  # empty → omitted
 
-        coll_dir = cwd / slug.rstrip("/")
+        # Resolve path the same way add entity does
+        path = path.rstrip("/")
+        if path.startswith("/"):
+            base_dir = content / path.lstrip("/")
+        elif path in ("", "."):
+            base_dir = cwd
+        else:
+            content_abs = (content / path).resolve()
+            cwd_abs = (cwd / path).resolve()
+            if content_abs.exists() or not cwd_abs.exists():
+                base_dir = content_abs
+            else:
+                base_dir = cwd_abs
+
+        coll_dir = base_dir / slug.rstrip("/")
         md_file = coll_dir / "_collection.md"
         if md_file.exists():
             print(f"  already exists: {md_file.relative_to(project)}")
@@ -1723,7 +1748,7 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
 
         old_path = _ask(
             "entity or kind path",
-            completer=_MultiPathCompleter([content, kinds]),
+            complete_from_cwd=(cwd, content),
             default=default_path,
         )
         if not old_path:
@@ -1755,7 +1780,7 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
     if entity_dir.is_dir() and (entity_dir / "index.md").is_file():
         old_name = read_entity_display_name(entity_dir)
         if old_name:
-            answer = _ask("new display name", default=old_name)
+            answer = _ask("new display name", default=_slug_to_title(new_slug))
             if answer and answer != old_name:
                 new_display["name"] = answer
     else:
@@ -2059,6 +2084,7 @@ def run_shell(project: Path) -> None:
             _cmd_tree(cwd, content, args)
         elif cmd == "cd":
             cwd = _cmd_cd(cwd, content, args)
+            shell_completer.cwd = cwd
         elif cmd == "add":
             new_coll = _cmd_add(project, cwd, args, recent_collections)
             if new_coll and new_coll not in recent_collections:

@@ -411,12 +411,13 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
     cwd_kinds = kinds_root(root)
     target_dir = (cwd_content / old_path.rstrip("/")).resolve()
     new_display: dict[str, str] = {}
+    _slug_to_title = lambda s: " ".join(w.capitalize() for w in s.replace("_", "-").split("-") if w)
     if target_dir.is_dir() and (target_dir / "index.md").is_file():
         old_name = read_entity_display_name(target_dir)
         if old_name:
             new_name = click.prompt(
                 f"  new display name (current: {old_name!r})",
-                default=old_name,
+                default=_slug_to_title(new_slug),
                 show_default=False,
             )
             if new_name and new_name != old_name:
@@ -425,10 +426,12 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
         kind_dir = (cwd_kinds / old_path.rstrip("/")).resolve()
         if kind_dir.is_dir() and (kind_dir / "_kind.yaml").is_file():
             old_singular, old_plural, old_description = read_kind_display_names(kind_dir)
+            new_singular_default = _slug_to_title(new_slug)
+            new_plural_default = f"{new_singular_default}s"
             if old_singular:
                 ns = click.prompt(
                     f"  new singular (current: {old_singular!r})",
-                    default=old_singular,
+                    default=new_singular_default,
                     show_default=False,
                 )
                 if ns and ns != old_singular:
@@ -436,7 +439,7 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
             if old_plural:
                 np = click.prompt(
                     f"  new plural (current: {old_plural!r})",
-                    default=old_plural,
+                    default=new_plural_default,
                     show_default=False,
                 )
                 if np and np != old_plural:

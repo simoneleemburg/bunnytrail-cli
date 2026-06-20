@@ -679,3 +679,67 @@ def test_rename_rewrites_multiple_path_fields_in_one_entity(project: Path) -> No
     assert "class: aurethia/places/sharazan-new" in fm, fm
     assert "target: aurethia/places/sharazan-new" in fm, fm
     assert "role: aurethia/places/sharazan-new" in fm, fm
+
+
+# ---------------------------------------------------------------------------
+# rename collection — class: / role: / within: fields in descendant entities
+# ---------------------------------------------------------------------------
+
+def test_rename_collection_rewrites_class_field(project: Path) -> None:
+    """Renaming a parent collection updates class: fields that point inside it."""
+    # Give duskmere a class: that lives under aurethia/places/bayurinda
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        "name: Duskmere\nkind: being\nclass: aurethia/places/bayurinda/nuunlau",
+    )
+    plan = plan_rename(project, "aurethia/places/bayurinda", "bayurinda-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    assert "class: aurethia/places/bayurinda-new/nuunlau" in fm, fm
+
+
+def test_rename_collection_rewrites_class_pointing_at_collection_itself(project: Path) -> None:
+    """class: pointing directly at the renamed collection is also updated."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        "name: Duskmere\nkind: being\nclass: aurethia/places/bayurinda",
+    )
+    plan = plan_rename(project, "aurethia/places/bayurinda", "bayurinda-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    assert "class: aurethia/places/bayurinda-new" in fm, fm
+
+
+def test_rename_collection_does_not_rewrite_unrelated_class(project: Path) -> None:
+    """class: paths that only share a prefix substring are NOT rewritten."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        # 'bayurinda-extended' starts with 'bayurinda' but is a different entity
+        "name: Duskmere\nkind: being\nclass: aurethia/places/sharazan",
+    )
+    plan = plan_rename(project, "aurethia/places/bayurinda", "bayurinda-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    # sharazan is unrelated — must stay unchanged
+    assert "class: aurethia/places/sharazan" in fm, fm
+
+
+# ---------------------------------------------------------------------------
+# move collection — class: / role: / within: fields in descendant entities
+# ---------------------------------------------------------------------------
+
+def test_move_collection_rewrites_class_field(project: Path) -> None:
+    """Moving a collection updates class: fields that point at entities inside it."""
+    _set_frontmatter(
+        project, "aurethia/people/duskmere",
+        "name: Duskmere\nkind: being\nclass: aurethia/places/bayurinda/nuunlau",
+    )
+    from bunnytrail_cli.helpers import plan_move, execute_move
+    plan = plan_move(project, "aurethia/places/bayurinda", "aurethia/people")
+    assert plan.error == ""
+    execute_move(plan)
+    fm = _read_frontmatter(project, "aurethia/people/duskmere")
+    assert "class: aurethia/people/bayurinda/nuunlau" in fm, fm

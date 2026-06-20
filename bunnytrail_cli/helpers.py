@@ -2582,6 +2582,16 @@ def _scan_collection_refs(
         + re.escape(old_collection_id)
         + r"(?:/[A-Za-z0-9_\-/]+)?)(?P<suffix>\s*)$"
     )
+    # Other frontmatter fields that store entity paths (class:, role:,
+    # within:, species:).  Same prefix-cascade logic as target_re.
+    _coll_path_fields = "|".join(
+        re.escape(f) for f in ("class", "role", "within", "species")
+    )
+    extra_path_re = re.compile(
+        r"^(?P<prefix>\s*(?:-\s+)?(?:" + _coll_path_fields + r"):\s*)"
+        r"(?P<id>" + re.escape(old_collection_id) + r"(?:/[A-Za-z0-9_\-/]+)?)"
+        r"(?P<suffix>(?:\s+.*)?)$"
+    )
 
     for md_file in iter_link_consumer_files(project):
         is_entity = md_file.name == "index.md" and is_entity_folder(md_file.parent)
@@ -2605,6 +2615,13 @@ def _scan_collection_refs(
                         if new_id != m.group("id"):
                             new_line = m.group("prefix") + new_id + m.group("suffix")
                             refs.append(MoveRef(md_file, i, line, new_line))
+                    else:
+                        m = extra_path_re.match(line)
+                        if m:
+                            new_id = cascade(m.group("id"))
+                            if new_id != m.group("id"):
+                                new_line = m.group("prefix") + new_id + m.group("suffix")
+                                refs.append(MoveRef(md_file, i, line, new_line))
                 continue
 
             if "[[" not in line:
