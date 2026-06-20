@@ -415,11 +415,11 @@ class _ShellCompleter(Completer):
 
         if cmd == "cd":
             if len(tokens) == 2:
-                yield from _yield_paths(fragment, self._content, frag_start)
+                yield from _yield_paths(fragment, self.cwd, frag_start)
 
         elif cmd == "tree":
             if len(tokens) == 2:
-                yield from _yield_paths(fragment, self._content, frag_start)
+                yield from _yield_paths(fragment, self.cwd, frag_start)
 
         elif cmd == "add":
             if len(tokens) == 2 and not trailing_space:
@@ -436,10 +436,10 @@ class _ShellCompleter(Completer):
                         )
                     elif len(tokens) == 6:
                         # arg 4: path (after kind, slug, name)
-                        yield from _yield_paths(fragment, self._content, frag_start)
+                        yield from _yield_paths(fragment, self.cwd, frag_start)
                 elif sub == "collection":
                     if len(tokens) == 3:
-                        yield from _yield_paths(fragment, self._content, frag_start)
+                        yield from _yield_paths(fragment, self.cwd, frag_start)
                 elif sub == "kind":
                     if len(tokens) == 3:
                         yield from _yield_paths(fragment, self._kinds, frag_start)
@@ -1469,14 +1469,17 @@ def _cmd_add(
         elif path in ("", "."):
             base_dir = cwd
         else:
-            # Could be content-relative (from a suggestion) or cwd-relative
-            content_abs = (content / path).resolve()
+            # cwd-relative first (completer produces cwd-relative paths);
+            # fall back to content-relative for absolute-style suggestions from
+            # _KindSuggestedPathCompleter (which yields content-relative strings).
             cwd_abs = (cwd / path).resolve()
-            if content_abs.exists() or not cwd_abs.exists():
-                # Prefer content-relative when it resolves or neither resolves
+            content_abs = (content / path).resolve()
+            if cwd_abs.exists():
+                base_dir = cwd_abs
+            elif content_abs.exists():
                 base_dir = content_abs
             else:
-                base_dir = cwd_abs
+                base_dir = cwd_abs  # neither exists; will mkdir under cwd
         entity_dir = base_dir / slug.rstrip("/")
         md_file = entity_dir / "index.md"
         if md_file.exists():
@@ -1537,12 +1540,14 @@ def _cmd_add(
         elif path in ("", "."):
             base_dir = cwd
         else:
-            content_abs = (content / path).resolve()
             cwd_abs = (cwd / path).resolve()
-            if content_abs.exists() or not cwd_abs.exists():
+            content_abs = (content / path).resolve()
+            if cwd_abs.exists():
+                base_dir = cwd_abs
+            elif content_abs.exists():
                 base_dir = content_abs
             else:
-                base_dir = cwd_abs
+                base_dir = cwd_abs  # neither exists; will mkdir under cwd
 
         coll_dir = base_dir / slug.rstrip("/")
         md_file = coll_dir / "_collection.md"
@@ -1657,22 +1662,31 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
 
     if entity_path is None:
         try:
-            default_path = str(cwd.relative_to(content))
+            default_path = str(cwd.relative_to(content if not is_kind else kinds))
         except ValueError:
             default_path = ""
-        entity_path = _ask(base_label, complete_from=base, default=default_path)
+        if is_kind:
+            entity_path = _ask(base_label, complete_from=kinds, default=default_path)
+        else:
+            entity_path = _ask(base_label, complete_from_cwd=(cwd, content), default=default_path)
         if not entity_path:
             return
 
     if new_parent is None:
-        new_parent = _ask(parent_label, complete_from=base)
+        if is_kind:
+            new_parent = _ask(parent_label, complete_from=kinds)
+        else:
+            new_parent = _ask(parent_label, complete_from_cwd=(cwd, content))
         if not new_parent:
             return
 
     def _resolve_content(p: str) -> str:
         p = p.rstrip("/")
-        if (cwd / p).is_dir():
-            return str((cwd / p).relative_to(content))
+        if p.startswith("/"):
+            return p.lstrip("/")
+        cwd_abs = (cwd / p).resolve()
+        if cwd_abs.is_dir() and cwd_abs.is_relative_to(content):
+            return str(cwd_abs.relative_to(content))
         return p
 
     def _resolve_kinds(p: str) -> str:
@@ -1741,10 +1755,8 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
     new_slug = args[1] if len(args) > 1 else None
 
     if old_path is None:
-        try:
-            default_path = str(cwd.relative_to(content))
-        except ValueError:
-            default_path = ""
+        # Default is "." — means the cwd itself (useful when cd'd into an entity folder)
+        default_path = "." if cwd != content else ""
 
         old_path = _ask(
             "entity or kind path",
@@ -1761,12 +1773,16 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
 
     def _resolve(p: str) -> str:
         p = p.rstrip("/")
-        if (cwd / p).is_dir():
-            candidate = cwd / p
-            if candidate.is_relative_to(content):
-                return str(candidate.relative_to(content))
-            if candidate.is_relative_to(kinds):
-                return str(candidate.relative_to(kinds))
+        if p.startswith("/"):
+            # content-root absolute (from _CwdPathCompleter '/' prefix)
+            cand = (content / p.lstrip("/")).resolve()
+        else:
+            cand = (cwd / p).resolve()
+        if cand.is_dir():
+            if cand.is_relative_to(content):
+                return str(cand.relative_to(content))
+            if cand.is_relative_to(kinds):
+                return str(cand.relative_to(kinds))
         return p
 
     old_path = _resolve(old_path)
@@ -1862,12 +1878,12 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str]) -> 
             default_path = str(cwd.relative_to(content))
         except ValueError:
             default_path = ""
-        article_path = _ask("article path", complete_from=content, default=default_path)
+        article_path = _ask("article path", complete_from_cwd=(cwd, content), default=default_path)
         if not article_path:
             return
 
     if namespace_path is None:
-        namespace_path = _ask("namespace path", complete_from=content)
+        namespace_path = _ask("namespace path", complete_from_cwd=(cwd, content))
         if not namespace_path:
             return
 
@@ -1875,7 +1891,14 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str]) -> 
 
     def _resolve(p: str) -> str:
         p = p.rstrip("/")
-        cand = (cwd / p).resolve() if not Path(p).is_absolute() else Path(p).resolve()
+        if Path(p).is_absolute():
+            cand = Path(p).resolve()
+        elif p.startswith("/"):
+            cand = (content / p.lstrip("/")).resolve()
+        else:
+            # cwd-relative first, content-relative fallback
+            cwd_abs = (cwd / p).resolve()
+            cand = cwd_abs if cwd_abs.is_dir() else (content / p).resolve()
         if cand.is_dir():
             if cand == guides_dir or guides_dir in cand.parents:
                 rel = cand.relative_to(guides_dir)
