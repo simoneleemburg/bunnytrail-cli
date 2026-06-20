@@ -381,7 +381,7 @@ def _scan_entity_refs(
     References are looked for in:
       * ``target: <old-id>`` lines in any entity's ``index.md``
         frontmatter.
-      * ``class: <old-id>`` (top-level), ``role: <old-id>``,
+      * ``class: <old-id>`` (top-level), ``qualifier: <old-id>``,
         ``within: <old-id>``, and ``species: <old-id>`` lines
         (the last three may be indented) in entity frontmatter.
       * ``[[<link>]]`` tokens that resolve to *old_id* in any
@@ -415,11 +415,11 @@ def _scan_entity_refs(
         r"^(?P<prefix>\s*(?:-\s+)?target:\s*)(?P<id>" + re.escape(old_id) + r")(?P<suffix>\s*.*)$"
     )
     # Other frontmatter fields that store entity paths.
-    # ``class:`` is always top-level; ``role:``, ``within:``, ``species:``
+    # ``class:`` is always top-level; ``qualifier:``, ``within:``, ``species:``
     # may appear as YAML list items, so the prefix may include ``- ``.
     # The path must be followed by end-of-line or whitespace (to avoid
     # matching a longer sibling path like aurethia/places/sharazan-extended).
-    _path_fields = "|".join(re.escape(f) for f in ("class", "role", "within", "species"))
+    _path_fields = "|".join(re.escape(f) for f in ("class", "qualifier", "within", "species"))
     extra_path_re = re.compile(
         r"^(?P<prefix>\s*(?:-\s+)?(?:" + _path_fields + r"):\s*)"
         r"(?P<id>" + re.escape(old_id) + r")"
@@ -2582,10 +2582,10 @@ def _scan_collection_refs(
         + re.escape(old_collection_id)
         + r"(?:/[A-Za-z0-9_\-/]+)?)(?P<suffix>\s*)$"
     )
-    # Other frontmatter fields that store entity paths (class:, role:,
+    # Other frontmatter fields that store entity paths (class:, qualifier:,
     # within:, species:).  Same prefix-cascade logic as target_re.
     _coll_path_fields = "|".join(
-        re.escape(f) for f in ("class", "role", "within", "species")
+        re.escape(f) for f in ("class", "qualifier", "within", "species")
     )
     extra_path_re = re.compile(
         r"^(?P<prefix>\s*(?:-\s+)?(?:" + _coll_path_fields + r"):\s*)"

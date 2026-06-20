@@ -528,7 +528,7 @@ def test_entity_move_updates_guide_body(project: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Extra entity-path frontmatter fields: class, role, within, species
+# Extra entity-path frontmatter fields: class, qualifier, within, species
 # ---------------------------------------------------------------------------
 
 def test_rename_rewrites_class_field(project: Path) -> None:
@@ -558,8 +558,8 @@ def test_move_rewrites_class_field(project: Path) -> None:
     assert "class: earth/places/sharazan" in fm, fm
 
 
-def test_rename_rewrites_role_in_relation(project: Path) -> None:
-    """``role: <entity-path>`` inside a relations list item is rewritten on rename."""
+def test_rename_rewrites_qualifier_in_relation(project: Path) -> None:
+    """``qualifier: <entity-path>`` inside a relations list item is rewritten on rename."""
     _set_frontmatter(
         project, "aurethia/people/duskmere",
         (
@@ -567,15 +567,15 @@ def test_rename_rewrites_role_in_relation(project: Path) -> None:
             "relations:\n"
             "  - kind: member-of\n"
             "    target: aurethia/places/bayurinda\n"
-            "    role: aurethia/places/sharazan\n"
+            "    qualifier: aurethia/places/sharazan\n"
         ),
     )
     plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
     assert plan.error == ""
     execute_rename(plan)
     fm = _read_frontmatter(project, "aurethia/people/duskmere")
-    assert "role: aurethia/places/sharazan-new" in fm, fm
-    assert "role: aurethia/places/sharazan\n" not in fm, fm
+    assert "qualifier: aurethia/places/sharazan-new" in fm, fm
+    assert "qualifier: aurethia/places/sharazan\n" not in fm, fm
 
 
 def test_rename_rewrites_statistics_within(project: Path) -> None:
@@ -669,7 +669,7 @@ def test_rename_rewrites_multiple_path_fields_in_one_entity(project: Path) -> No
             "relations:\n"
             "  - kind: located-in\n"
             "    target: aurethia/places/sharazan\n"
-            "    role: aurethia/places/sharazan\n"
+            "    qualifier: aurethia/places/sharazan\n"
         ),
     )
     plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
@@ -678,11 +678,11 @@ def test_rename_rewrites_multiple_path_fields_in_one_entity(project: Path) -> No
     fm = _read_frontmatter(project, "aurethia/people/duskmere")
     assert "class: aurethia/places/sharazan-new" in fm, fm
     assert "target: aurethia/places/sharazan-new" in fm, fm
-    assert "role: aurethia/places/sharazan-new" in fm, fm
+    assert "qualifier: aurethia/places/sharazan-new" in fm, fm
 
 
 # ---------------------------------------------------------------------------
-# rename collection — class: / role: / within: fields in descendant entities
+# rename collection — class: / qualifier: / within: fields in descendant entities
 # ---------------------------------------------------------------------------
 
 def test_rename_collection_rewrites_class_field(project: Path) -> None:
@@ -728,7 +728,7 @@ def test_rename_collection_does_not_rewrite_unrelated_class(project: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# move collection — class: / role: / within: fields in descendant entities
+# move collection — class: / qualifier: / within: fields in descendant entities
 # ---------------------------------------------------------------------------
 
 def test_move_collection_rewrites_class_field(project: Path) -> None:
