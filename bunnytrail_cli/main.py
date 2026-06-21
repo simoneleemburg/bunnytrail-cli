@@ -3,7 +3,7 @@ main.py — bunnytrail CLI (`bt`) entry point.
 
 Usage:
     bt shell                   interactive REPL (recommended)
-    bt hello
+    bt stats [PATH]
     bt tree [--kinds] [--depth N] [PATH]
     bt add entity PATH NAME KIND
     bt add collection PATH
@@ -35,6 +35,7 @@ from .helpers import (
     format_crosslink_warnings,
     format_diff_pair,
     format_refs,
+    iter_collections,
     iter_entity_md_files,
     iter_kind_md_files,
     kinds_root,
@@ -66,29 +67,6 @@ def cli(ctx: click.Context) -> None:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
-
-# ---------------------------------------------------------------------------
-# hello
-# ---------------------------------------------------------------------------
-
-@cli.command()
-@click.pass_context
-def hello(ctx: click.Context) -> None:
-    """Print a greeting and confirm the project root was found."""
-    root: Path = ctx.obj["root"]
-    click.echo("Hello from the bunnytrail CLI.")
-    click.echo(f"Project root: {root}")
-
-    # Quick stats
-    content = content_root(root)
-    kinds = kinds_root(root)
-
-    entity_count = sum(1 for _ in iter_entity_md_files(content))
-    kind_count = sum(1 for _ in iter_kind_md_files(kinds))
-    click.echo(f"Entities found: {entity_count}")
-    click.echo(f"Kinds found:    {kind_count}")
-
-
 # ---------------------------------------------------------------------------
 # shell (interactive REPL)
 # ---------------------------------------------------------------------------
@@ -99,6 +77,46 @@ def shell(ctx: click.Context) -> None:
     """Start the interactive bunnytrail shell with tab completion."""
     from .repl import run_shell  # local import keeps startup fast
     run_shell(ctx.obj["root"])
+
+
+# ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("path", default="", required=False)
+@click.pass_context
+def stats(ctx: click.Context, path: str) -> None:
+    """Show entity, collection, and kind counts.
+
+    PATH is optional; if given it is a sub-path relative to content/.
+    When omitted, counts the entire project.
+    """
+    root: Path = ctx.obj["root"]
+    content = content_root(root)
+    kinds = kinds_root(root)
+
+    base = content / path if path else content
+    if not base.is_dir():
+        click.echo(f"Error: '{base}' is not a directory.", err=True)
+        sys.exit(1)
+
+    entity_count = sum(1 for _ in iter_entity_md_files(base))
+    collection_count = sum(1 for _ in iter_collections(base))
+
+    try:
+        rel = base.relative_to(content)
+        label = f"content/{rel}" if str(rel) != "." else "content/"
+    except ValueError:
+        label = str(base)
+
+    click.echo(f"Path       : {label}")
+    click.echo(f"Entities   : {entity_count}")
+    click.echo(f"Collections: {collection_count}")
+
+    if not path:
+        kind_count = sum(1 for _ in iter_kind_md_files(kinds))
+        click.echo(f"Kinds      : {kind_count}")
 
 
 # ---------------------------------------------------------------------------

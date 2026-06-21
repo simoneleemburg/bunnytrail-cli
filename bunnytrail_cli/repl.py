@@ -32,6 +32,7 @@ from .helpers import (
     format_diff_pair,
     format_refs,
     is_entity_folder,
+    iter_collections,
     iter_entity_md_files,
     iter_kind_md_files,
     kind_has_class_constraint,
@@ -47,6 +48,7 @@ from .helpers import (
     plan_rename,
     resolve_content_path,
     slug_to_title,
+    to_content_id,
     use_color,
     write_frontmatter_md,
 )
@@ -58,9 +60,9 @@ from .helpers import (
 HISTORY_FILE = Path.home() / ".bt_history"
 
 TOP_LEVEL_COMMANDS = [
-    "hello",
     "ls",
     "info",
+    "stats",
     "tree",
     "cd",
     "add",
@@ -245,6 +247,46 @@ class _PathCompleter(Completer):
             )
 
 
+class _KindCompleter(Completer):
+    """Completer for the entity ``kind:`` prompt.
+
+    Lets the user navigate the kinds tree (``natural/``, ``natural/character/``,
+    ``natural/character/person/``) for discoverability, but when a leaf kind
+    folder is selected (one that contains ``_kind.yaml``) the completion text
+    is replaced with just the leaf slug (e.g. ``person``), since that is what
+    ``kind:`` stores.
+
+    Non-leaf folders complete normally with a trailing ``/`` so the user can
+    keep drilling down.
+    """
+
+    def __init__(self, kinds_base: Path) -> None:
+        self._base = kinds_base
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        text = document.text_before_cursor
+        for replacement, display in _path_completions(text, self._base):
+            # Check if this candidate is a leaf kind (has _kind.yaml)
+            candidate_dir = self._base / replacement.rstrip("/")
+            if (candidate_dir / "_kind.yaml").is_file():
+                # Leaf kind: replace the whole typed text with just the slug
+                leaf_slug = candidate_dir.name
+                yield Completion(
+                    leaf_slug,
+                    start_position=-len(text),
+                    display=f"{display}  [{leaf_slug}]",
+                )
+            else:
+                # Intermediate folder: navigate normally
+                yield Completion(
+                    replacement,
+                    start_position=-len(text),
+                    display=display,
+                )
+
+
 class _CwdPathCompleter(Completer):
     """
     Completes paths relative to *cwd* by default.
@@ -427,6 +469,10 @@ class _ShellCompleter(Completer):
             if len(tokens) == 2:
                 yield from _yield_paths(fragment, self.cwd, frag_start)
 
+        elif cmd == "stats":
+            if len(tokens) == 2:
+                yield from _yield_paths(fragment, self.cwd, frag_start)
+
         elif cmd == "add":
             if len(tokens) == 2 and not trailing_space:
                 yield from _yield_words(ADD_SUBCOMMANDS, fragment, frag_start)
@@ -436,10 +482,13 @@ class _ShellCompleter(Completer):
                 if sub == "entity":
                     # new order: add entity <kind> <slug> <name> <path>
                     if len(tokens) == 3:
-                        # arg 1: kind
-                        yield from _yield_words(
-                            _all_kind_ids(self._kinds), fragment, frag_start
-                        )
+                        # arg 1: kind — path-navigable, resolves to leaf slug
+                        for replacement, display in _path_completions(fragment, self._kinds):
+                            candidate = self._kinds / replacement.rstrip("/")
+                            if (candidate / "_kind.yaml").is_file():
+                                yield Completion(candidate.name, start_position=frag_start, display=f"{display}  [{candidate.name}]")
+                            else:
+                                yield Completion(replacement, start_position=frag_start, display=display)
                     elif len(tokens) == 6:
                         # arg 4: path (after kind, slug, name)
                         yield from _yield_paths(fragment, self.cwd, frag_start)
@@ -543,14 +592,35 @@ def _ask(
 # Command handlers
 # ---------------------------------------------------------------------------
 
-def _cmd_hello(project: Path) -> None:
-    content = content_root(project)
+def _cmd_stats(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
+    """Show entity / collection / kind counts for a path (default: cwd)."""
     kinds = kinds_root(project)
-    entity_count = sum(1 for _ in iter_entity_md_files(content))
-    kind_count = sum(1 for _ in iter_kind_md_files(kinds))
-    print(f"Project root : {project}")
-    print(f"Entities     : {entity_count}")
-    print(f"Kinds        : {kind_count}")
+
+    if args:
+        base = resolve_content_path(args[0], cwd=cwd, content=content)
+        if not base.is_dir():
+            print(f"  not a directory: {args[0]}")
+            return
+    else:
+        base = cwd
+
+    entity_count = sum(1 for _ in iter_entity_md_files(base))
+    collection_count = sum(1 for _ in iter_collections(base))
+
+    try:
+        rel = base.relative_to(content)
+        label = f"content/{rel}" if str(rel) != "." else "content/"
+    except ValueError:
+        label = str(base)
+
+    print(f"  Path       : {label}")
+    print(f"  Entities   : {entity_count}")
+    print(f"  Collections: {collection_count}")
+
+    # Show kind count only when at or near the project root
+    if base == content or base == project:
+        kind_count = sum(1 for _ in iter_kind_md_files(kinds))
+        print(f"  Kinds      : {kind_count}")
 
 
 def _cmd_ls(cwd: Path, content: Path) -> None:
@@ -694,8 +764,7 @@ def _prompt_single_field(
             return False
         name = val
     elif field == "kind":
-        kind_ids = _all_kind_ids(kinds)
-        val = _ask("kind", completer=kind_ids, default=kind_val)  # type: ignore[arg-type]
+        val = _ask("kind", completer=_KindCompleter(kinds), default=kind_val)
         if val is None:
             return False
         kind_val = val.split("/")[-1]
@@ -709,7 +778,7 @@ def _prompt_single_field(
         val = _ask("class", complete_from_cwd=(cwd, content), default=entity_class)
         if val is None:
             return False
-        entity_class = val
+        entity_class = to_content_id(val, cwd=cwd, content=content) if val else ""
     else:
         # world property
         prop_def = next((p for p in world_cfg.applicable_properties(kind_id) if p.slug == field), None)
@@ -867,8 +936,7 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
             if name is None:
                 return
 
-            kind_ids = _all_kind_ids(kinds)
-            kind = _ask("kind", completer=kind_ids, default=kind_id)  # type: ignore[arg-type]
+            kind = _ask("kind", completer=_KindCompleter(kinds), default=kind_id)
             if kind is None:
                 return
             kind_id = kind.split("/")[-1]
@@ -883,7 +951,7 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                 val = _ask("class", complete_from_cwd=(cwd, content), default=old_class)
                 if val is None:
                     return
-                entity_class = val
+                entity_class = to_content_id(val, cwd=cwd, content=content) if val else ""
 
             prop_values: dict[str, str] = {}
             for prop in world_cfg.applicable_properties(kind_id):
@@ -918,7 +986,7 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                         rel_target = _ask("  rel target", complete_from_cwd=(cwd, content))
                     if not rel_target:
                         break
-                    entry: dict[str, str] = {"kind": rel_kind, "target": rel_target.strip("/")}
+                    entry: dict[str, str] = {"kind": rel_kind, "target": to_content_id(rel_target, cwd=cwd, content=content)}
                     if rel_def and rel_def.qualifier_required:
                         q_domain = rel_def.qualifier_domain
                         if q_domain:
@@ -931,7 +999,7 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                         else:
                             rel_qualifier = _ask("  qualifier", complete_from_cwd=(cwd, content))
                         if rel_qualifier:
-                            entry["qualifier"] = rel_qualifier.strip("/")
+                            entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
                     relation_entries.append(entry)
 
             _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body)
@@ -1372,8 +1440,7 @@ def _cmd_add(
 
         # 1. Ask kind first
         if kind_arg is None:
-            kind_ids = _all_kind_ids(kinds)
-            kind_arg = _ask("kind", completer=kind_ids)  # type: ignore[arg-type]
+            kind_arg = _ask("kind", completer=_KindCompleter(kinds))
             if not kind_arg:
                 return None
         kind_id = kind_arg.split("/")[-1]
@@ -1417,10 +1484,9 @@ def _cmd_add(
         # Ask for class: if this kind declares a class constraint in its _kind.yaml
         entity_class: "str | None" = None
         if kind_has_class_constraint(project, kind_id):
-            entity_class = _ask(
-                "class",
-                complete_from_cwd=(cwd, content),
-            )
+            raw_class = _ask("class", complete_from_cwd=(cwd, content))
+            if raw_class:
+                entity_class = to_content_id(raw_class, cwd=cwd, content=content)
             # empty answer → skip the field silently
 
         # Ask for applicable properties (those unrestricted or matching kind)
@@ -1459,8 +1525,7 @@ def _cmd_add(
                     rel_target = _ask("  rel target", complete_from_cwd=(cwd, content))
                 if not rel_target:
                     break
-                rel_target = rel_target.strip("/")
-                entry: "dict[str, str]" = {"kind": rel_kind, "target": rel_target}
+                entry: "dict[str, str]" = {"kind": rel_kind, "target": to_content_id(rel_target, cwd=cwd, content=content)}
 
                 # Prompt for qualifier only when the relation requires one
                 if rel_def and rel_def.qualifier_required:
@@ -1475,7 +1540,7 @@ def _cmd_add(
                     else:
                         rel_qualifier = _ask("  qualifier", complete_from_cwd=(cwd, content))
                     if rel_qualifier:
-                        entry["qualifier"] = rel_qualifier.strip("/")
+                        entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
 
                 relation_entries.append(entry)
 
@@ -1926,9 +1991,9 @@ def _cmd_help() -> None:
         """
   Commands
   --------
-  hello                                 project stats
   ls                                    list current directory
   info                                  show name and summary for entities in current directory
+  stats [path]                          entity / collection / kind counts (default: cwd)
   edit <path>                           edit entity or collection frontmatter
   check <path>                          list entities missing a world property
   strip <path>                          remove a property from all entities that have it
@@ -2008,12 +2073,12 @@ def run_shell(project: Path) -> None:
         if cmd in ("exit", "quit"):
             print("Bye.")
             break
-        elif cmd == "hello":
-            _cmd_hello(project)
         elif cmd == "ls":
             _cmd_ls(cwd, content)
         elif cmd == "info":
             _cmd_info(cwd, content)
+        elif cmd == "stats":
+            _cmd_stats(project, cwd, content, args)
         elif cmd == "edit":
             _cmd_edit(project, cwd, content, args)
         elif cmd == "check":

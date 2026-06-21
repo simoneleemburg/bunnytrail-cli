@@ -1241,6 +1241,24 @@ def resolve_content_path(raw: str, *, cwd: Path, content: Path) -> Path:
     return (content / raw).resolve()
 
 
+def to_content_id(raw: str, *, cwd: Path, content: Path) -> str:
+    """Resolve a user-typed path to a content-relative id string.
+
+    Applies the same cwd-relative / ``/``-prefixed resolution as
+    :func:`resolve_content_path`, then returns the path relative to
+    *content* (e.g. ``"aurethia/people/characters/freya"``).
+
+    If the resolved path is not under *content* (or doesn't exist), the
+    raw value is returned stripped of leading/trailing slashes so the
+    caller can still store something sensible.
+    """
+    abs_path = resolve_content_path(raw, cwd=cwd, content=content)
+    try:
+        return str(abs_path.relative_to(content))
+    except ValueError:
+        return raw.strip("/")
+
+
 def load_world_config(project: Path) -> WorldConfig:
     """Build a :class:`WorldConfig` from the new ontology schema.
 
