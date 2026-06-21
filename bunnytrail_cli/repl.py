@@ -623,6 +623,128 @@ def _cmd_info(cwd: Path, content: Path) -> None:
     print("\n".join(output))
 
 
+def _write_entity_file(
+    md_file: Path,
+    name: str,
+    kind_id: str,
+    entity_class: str,
+    summary: str,
+    prop_values: dict[str, str],
+    relation_entries: list[dict[str, str]],
+    body: str,
+) -> None:
+    """Serialise entity frontmatter fields and write *md_file*."""
+    fm = f"name: {name}\nkind: {kind_id}"
+    if entity_class:
+        fm += f"\nclass: {entity_class.strip('/')}"
+    if summary:
+        fm += f"\nsummary: {summary}"
+    for prop_slug, prop_val in prop_values.items():
+        if any(c in prop_val for c in (':', '#', '[', ']', '{', '}', '&', '*', '!', '|', '>', "'", '"')):
+            fm += f'\n{prop_slug}: "{prop_val}"'
+        else:
+            fm += f"\n{prop_slug}: {prop_val}"
+    if relation_entries:
+        fm += "\nrelations:"
+        for entry in relation_entries:
+            fm += f"\n  - kind: {entry['kind']}"
+            fm += f"\n    target: {entry['target']}"
+            if "qualifier" in entry:
+                fm += f"\n    qualifier: {entry['qualifier']}"
+    write_frontmatter_md(md_file, fm, body)
+
+
+def _prompt_single_field(
+    project: Path,
+    cwd: Path,
+    content: Path,
+    field: str,
+    md_file: Path,
+    kind_id: str,
+    fm_lines: list[str],
+    body: str,
+) -> bool:
+    """Prompt for one field, patch it in place, write, return False on cancel."""
+    from .helpers import _parse_yaml_field  # type: ignore[attr-defined]
+    kinds = kinds_root(project)
+    world_cfg = load_world_config(project)
+    get = lambda f: _parse_yaml_field(fm_lines, f)
+
+    # Re-read all existing values so we can write a complete frontmatter
+    name = get("name")
+    kind_val = get("kind") or kind_id
+    summary = get("summary")
+    entity_class = get("class")
+    prop_values: dict[str, str] = {
+        p.slug: v for p in world_cfg.applicable_properties(kind_id)
+        if (v := get(p.slug))
+    }
+    # Preserve existing relation_entries when editing a single field
+    relation_entries: list[dict[str, str]] = []
+    in_rel = False
+    cur: dict[str, str] = {}
+    for line in fm_lines:
+        s = line.strip()
+        if s == "relations:":
+            in_rel = True
+            continue
+        if in_rel:
+            if s.startswith("- kind:"):
+                if cur:
+                    relation_entries.append(cur)
+                cur = {"kind": s[len("- kind:"):].strip()}
+            elif s.startswith("kind:"):
+                cur["kind"] = s[len("kind:"):].strip()
+            elif s.startswith("target:"):
+                cur["target"] = s[len("target:"):].strip()
+            elif s.startswith("qualifier:"):
+                cur["qualifier"] = s[len("qualifier:"):].strip()
+            elif s and not s.startswith("-"):
+                in_rel = False
+    if cur:
+        relation_entries.append(cur)
+
+    if field == "name":
+        val = _ask("name", default=name)
+        if val is None:
+            return False
+        name = val
+    elif field == "kind":
+        kind_ids = _all_kind_ids(kinds)
+        val = _ask("kind", completer=kind_ids, default=kind_val)  # type: ignore[arg-type]
+        if val is None:
+            return False
+        kind_val = val.split("/")[-1]
+        kind_id = kind_val
+    elif field == "summary":
+        val = _ask("summary (optional)", default=summary)
+        if val is None:
+            return False
+        summary = val
+    elif field == "class":
+        val = _ask("class", complete_from_cwd=(cwd, content), default=entity_class)
+        if val is None:
+            return False
+        entity_class = val
+    else:
+        # world property
+        prop_def = next((p for p in world_cfg.applicable_properties(kind_id) if p.slug == field), None)
+        if prop_def is None:
+            print(f"  unknown field: {field!r}")
+            return False
+        hint = f"  [{', '.join(prop_def.values[:4])}{'…' if len(prop_def.values) > 4 else ''}]" if prop_def.values else ""
+        val = _ask(f"{field} (optional){hint}", completer=prop_def.values if prop_def.values else None, default=get(field))  # type: ignore[arg-type]
+        if val is None:
+            return False
+        if val:
+            prop_values[field] = val
+        else:
+            prop_values.pop(field, None)
+
+    _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body)
+    return True
+
+
 def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
     from .helpers import (  # type: ignore[attr-defined]
         frontmatter_lines,
@@ -648,119 +770,6 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
             return None
         fm_str, body = split_frontmatter(text)
         return (fm_str or "").splitlines(), body
-
-    def _write_entity(
-        md_file: Path,
-        name: str,
-        kind_id: str,
-        entity_class: str,
-        summary: str,
-        prop_values: dict[str, str],
-        relation_entries: list[dict[str, str]],
-        body: str,
-    ) -> None:
-        fm = f"name: {name}\nkind: {kind_id}"
-        if entity_class:
-            fm += f"\nclass: {entity_class.strip('/')}"
-        if summary:
-            fm += f"\nsummary: {summary}"
-        for prop_slug, prop_val in prop_values.items():
-            if any(c in prop_val for c in (':', '#', '[', ']', '{', '}', '&', '*', '!', '|', '>', "'", '"')):
-                fm += f'\n{prop_slug}: "{prop_val}"'
-            else:
-                fm += f"\n{prop_slug}: {prop_val}"
-        if relation_entries:
-            fm += "\nrelations:"
-            for entry in relation_entries:
-                fm += f"\n  - kind: {entry['kind']}"
-                fm += f"\n    target: {entry['target']}"
-        write_frontmatter_md(md_file, fm, body)
-
-    def _prompt_single_field(
-        field: str,
-        md_file: Path,
-        kind_id: str,
-        fm_lines: list[str],
-        body: str,
-    ) -> bool:
-        """Prompt for one field, patch it in place, write, return False on cancel."""
-        kinds = kinds_root(project)
-        world_cfg = load_world_config(project)
-        get = lambda f: _parse_yaml_field(fm_lines, f)
-
-        # Re-read all existing values so we can write a complete frontmatter
-        name = get("name")
-        kind_val = get("kind") or kind_id
-        summary = get("summary")
-        entity_class = get("class")
-        prop_values: dict[str, str] = {
-            p.slug: v for p in world_cfg.applicable_properties(kind_id)
-            if (v := get(p.slug))
-        }
-        # We preserve existing relation_entries as-is when editing a single field
-        # (raw re-parse isn't trivial; relations stay unchanged unless field=="relations")
-        relation_entries: list[dict[str, str]] = []
-        # simple re-parse of relations block
-        in_rel = False
-        cur: dict[str, str] = {}
-        for line in fm_lines:
-            s = line.strip()
-            if s == "relations:":
-                in_rel = True
-                continue
-            if in_rel:
-                if s.startswith("- kind:"):
-                    if cur:
-                        relation_entries.append(cur)
-                    cur = {"kind": s[len("- kind:"):].strip()}
-                elif s.startswith("kind:"):
-                    cur["kind"] = s[len("kind:"):].strip()
-                elif s.startswith("target:"):
-                    cur["target"] = s[len("target:"):].strip()
-                elif s and not s.startswith("-"):
-                    in_rel = False
-        if cur:
-            relation_entries.append(cur)
-
-        if field == "name":
-            val = _ask("name", default=name)
-            if val is None:
-                return False
-            name = val
-        elif field == "kind":
-            kind_ids = _all_kind_ids(kinds)
-            val = _ask("kind", completer=kind_ids, default=kind_val)  # type: ignore[arg-type]
-            if val is None:
-                return False
-            kind_val = val.split("/")[-1]
-            kind_id = kind_val
-        elif field == "summary":
-            val = _ask("summary (optional)", default=summary)
-            if val is None:
-                return False
-            summary = val
-        elif field == "class":
-            val = _ask("class", complete_from_cwd=(cwd, content), default=entity_class)
-            if val is None:
-                return False
-            entity_class = val
-        else:
-            # world property
-            prop_def = next((p for p in world_cfg.applicable_properties(kind_id) if p.slug == field), None)
-            if prop_def is None:
-                print(f"  unknown field: {field!r}")
-                return False
-            hint = f"  [{', '.join(prop_def.values[:4])}{'…' if len(prop_def.values) > 4 else ''}]" if prop_def.values else ""
-            val = _ask(f"{field} (optional){hint}", completer=prop_def.values if prop_def.values else None, default=get(field))  # type: ignore[arg-type]
-            if val is None:
-                return False
-            if val:
-                prop_values[field] = val
-            else:
-                prop_values.pop(field, None)
-
-        _write_entity(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body)
-        return True
 
     # ---------------------------------------------------------------- resolve path
 
@@ -928,14 +937,28 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                         rel_target = _ask("  rel target", complete_from_cwd=(cwd, content))
                     if not rel_target:
                         break
-                    relation_entries.append({"kind": rel_kind, "target": rel_target.strip("/")})
+                    entry: dict[str, str] = {"kind": rel_kind, "target": rel_target.strip("/")}
+                    if rel_def and rel_def.qualifier_required:
+                        q_domain = rel_def.qualifier_domain
+                        if q_domain:
+                            q_completer = _KindSuggestedPathCompleter(content, cwd, q_domain)
+                            print(
+                                f"  (qualifier required; Tab to see candidates"
+                                f"; kinds: {', '.join(q_domain)})"
+                            )
+                            rel_qualifier = _ask("  qualifier", completer=q_completer)
+                        else:
+                            rel_qualifier = _ask("  qualifier", complete_from_cwd=(cwd, content))
+                        if rel_qualifier:
+                            entry["qualifier"] = rel_qualifier.strip("/")
+                    relation_entries.append(entry)
 
-            _write_entity(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body)
+            _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body)
             print(f"  updated {md_file.relative_to(project)}")
 
         else:
             # Single-field edit
-            ok = _prompt_single_field(field, md_file, kind_id, fm_lines, body)
+            ok = _prompt_single_field(project, cwd, content, field, md_file, kind_id, fm_lines, body)
             if not ok:
                 return
             print(f"  updated {md_file.relative_to(project)}")
@@ -1107,7 +1130,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         kind_id = get("kind")
 
         print(f"\n  {get('name') or ent_dir.name}")
-        ok = _prompt_single_field(field, md_file, kind_id, fm_lines, body)
+        ok = _prompt_single_field(project, cwd, content, field, md_file, kind_id, fm_lines, body)
         if not ok:
             return
         print(f"  updated {md_file.relative_to(project)}")
@@ -1457,7 +1480,24 @@ def _cmd_add(
                 if not rel_target:
                     break
                 rel_target = rel_target.strip("/")
-                relation_entries.append({"kind": rel_kind, "target": rel_target})
+                entry: "dict[str, str]" = {"kind": rel_kind, "target": rel_target}
+
+                # Prompt for qualifier only when the relation requires one
+                if rel_def and rel_def.qualifier_required:
+                    q_domain = rel_def.qualifier_domain
+                    if q_domain:
+                        q_completer = _KindSuggestedPathCompleter(content, cwd, q_domain)
+                        print(
+                            f"  (qualifier required; Tab to see candidates"
+                            f"; kinds: {', '.join(q_domain)})"
+                        )
+                        rel_qualifier = _ask("  qualifier", completer=q_completer)
+                    else:
+                        rel_qualifier = _ask("  qualifier", complete_from_cwd=(cwd, content))
+                    if rel_qualifier:
+                        entry["qualifier"] = rel_qualifier.strip("/")
+
+                relation_entries.append(entry)
 
         # Resolve path: leading '/' means relative to content root, else relative to cwd
         path = path.rstrip("/")
@@ -1504,6 +1544,8 @@ def _cmd_add(
             for entry in relation_entries:
                 fm += f"\n  - kind: {entry['kind']}"
                 fm += f"\n    target: {entry['target']}"
+                if "qualifier" in entry:
+                    fm += f"\n    qualifier: {entry['qualifier']}"
         write_frontmatter_md(md_file, fm)
         print(f"  created {md_file.relative_to(project)}")
         return None
