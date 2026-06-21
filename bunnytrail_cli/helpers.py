@@ -1161,6 +1161,39 @@ def _load_kind_properties(kind_yaml: Path) -> list[PropertyDef]:
     return props
 
 
+def parse_relation_entries(fm_lines: list[str]) -> list[dict[str, str]]:
+    """Parse the ``relations:`` block from frontmatter lines.
+
+    Returns a list of dicts with keys ``kind``, ``target``, and optionally
+    ``qualifier`` — one dict per relation list item.
+    """
+    entries: list[dict[str, str]] = []
+    in_rel = False
+    cur: dict[str, str] = {}
+    for line in fm_lines:
+        s = line.strip()
+        if s == "relations:":
+            in_rel = True
+            continue
+        if not in_rel:
+            continue
+        if s.startswith("- kind:"):
+            if cur:
+                entries.append(cur)
+            cur = {"kind": s[len("- kind:"):].strip()}
+        elif s.startswith("kind:"):
+            cur["kind"] = s[len("kind:"):].strip()
+        elif s.startswith("target:"):
+            cur["target"] = s[len("target:"):].strip()
+        elif s.startswith("qualifier:"):
+            cur["qualifier"] = s[len("qualifier:"):].strip()
+        elif s and not s.startswith("-"):
+            in_rel = False
+    if cur:
+        entries.append(cur)
+    return entries
+
+
 def kind_has_class_constraint(project: Path, kind_slug: str) -> bool:
     """Return True if *kind_slug*'s ``_kind.yaml`` declares a ``class:`` field.
 
@@ -1185,6 +1218,27 @@ def kind_has_class_constraint(project: Path, kind_slug: str) -> bool:
         if isinstance(data, dict) and data.get("class"):
             return True
     return False
+
+
+def resolve_content_path(raw: str, *, cwd: Path, content: Path) -> Path:
+    """Resolve a user-typed path string to an absolute :class:`Path`.
+
+    Resolution rules (in order):
+      1. Leading ``/``  → content-root-relative.
+      2. Empty or ``"."`` → *cwd*.
+      3. Otherwise → cwd-relative if that exists, else content-relative.
+         (Matches the behaviour of :class:`_CwdPathCompleter` which offers
+         cwd-relative completions and ``/``-prefixed content-root ones.)
+    """
+    raw = raw.rstrip("/")
+    if raw.startswith("/"):
+        return (content / raw.lstrip("/")).resolve()
+    if raw in ("", "."):
+        return cwd
+    cwd_abs = (cwd / raw).resolve()
+    if cwd_abs.exists():
+        return cwd_abs
+    return (content / raw).resolve()
 
 
 def load_world_config(project: Path) -> WorldConfig:
@@ -2727,7 +2781,7 @@ def _scan_collection_refs(
     return refs, warnings
 
 
-def _slug_to_title(slug: str) -> str:
+def slug_to_title(slug: str) -> str:
     """Convert a slug like 'primitive-elements' to 'Primitive Elements'."""
     return " ".join(word.capitalize() for word in slug.replace("_", "-").split("-") if word)
 
@@ -2748,8 +2802,8 @@ def _collection_title_ref(
     if fm is None:
         return None
     
-    old_title = _slug_to_title(old_slug)
-    new_title = _slug_to_title(new_slug)
+    old_title = slug_to_title(old_slug)
+    new_title = slug_to_title(new_slug)
     
     title_re = re.compile(r"^(?P<prefix>\s*title:\s*)(?P<value>.*?)(?P<suffix>\s*)$")
     
@@ -2931,3 +2985,68 @@ def format_diff_pair(
         + _render(new_chunks, new_changed, _ANSI_GREEN, _ANSI_BOLD_GREEN)
     )
     return (old_line, new_line)
+
+
+def format_collision_warning(plan) -> list[str]:
+    """Return ready-to-print lines describing a slug-collision warning on *plan*.
+
+    Returns an empty list when there are no collisions.
+    Callers pass each line to ``print()`` or ``click.echo()``.
+    """
+    peers = getattr(plan, "collisions", None) or []
+    if not peers:
+        return []
+    n = len(peers)
+    out = [
+        f"\nName clash: the new leaf slug is already used by "
+        f"{n} existing entit{'y' if n == 1 else 'ies'}:"
+    ]
+    for peer in peers:
+        out.append(f"  ! content/{peer}")
+    out.append(
+        "  Existing bare links to those entities will be rewritten "
+        "to a longer disambiguating form."
+    )
+    return out
+
+
+def format_crosslink_warnings(plans) -> list[str]:
+    """Return ready-to-print lines for any ``warn:`` terms that were auto-linked.
+
+    Returns an empty list when nothing was warned.
+    Callers pass each line to ``print()`` or ``click.echo()``.
+    """
+    by_term: dict[str, list[tuple[str, str, int]]] = {}
+    for plan in plans:
+        for edit in plan.edits:
+            for term in edit.warn_terms:
+                by_term.setdefault(term, []).append(
+                    (plan.article_id, plan.md_file.name, edit.line_no)
+                )
+    if not by_term:
+        return []
+    out = ["\nWarnings (terms flagged in content_meta/bt.yml `crosslink.warn`):"]
+    for term in sorted(by_term):
+        out.append(f"  '{term}' linked in:")
+        for article_id, md_name, line_no in by_term[term]:
+            out.append(f"    content/{article_id}/{md_name}:{line_no}")
+    return out
+
+
+def format_refs(refs, project: Path, *, indent: str = "  ") -> list[str]:
+    """Return ready-to-print lines for a list of :class:`MoveRef` objects.
+
+    Each ref produces three lines: ``path:lineno``, the old text (red),
+    and the new text (green).  Callers pass each line to ``print()`` or
+    ``click.echo()``.
+    """
+    out: list[str] = []
+    for ref in refs:
+        rel = ref.file.relative_to(project)
+        out.append(f"{indent}{rel}:{ref.line_no}")
+        old_ln, new_ln = format_diff_pair(
+            ref.old_text, ref.new_text, indent=indent + "  ", color=use_color()
+        )
+        out.append(old_ln)
+        out.append(new_ln)
+    return out

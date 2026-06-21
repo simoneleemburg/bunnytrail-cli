@@ -31,7 +31,10 @@ from .helpers import (
     execute_move,
     execute_rename,
     find_project_root,
+    format_collision_warning,
+    format_crosslink_warnings,
     format_diff_pair,
+    format_refs,
     iter_entity_md_files,
     iter_kind_md_files,
     kinds_root,
@@ -42,6 +45,7 @@ from .helpers import (
     plan_move,
     plan_move_kind,
     plan_rename,
+    slug_to_title,
     use_color,
     write_frontmatter_md,
 )
@@ -342,29 +346,6 @@ def add_ontology(
 # rename
 # ---------------------------------------------------------------------------
 
-def _print_collisions(plan) -> None:
-    """Print a 'name clash' warning for a move/rename plan.
-
-    Called from both :func:`rename` and :func:`move` once the plan has
-    been built.  ``plan.collisions`` is a (possibly empty) list of
-    existing entity ids that share the new leaf slug; emitting them
-    here lets the user decide whether to abort.  Existing links to
-    those peers will be rewritten by the same scanner pass.
-    """
-    if not plan.collisions:
-        return
-    n = len(plan.collisions)
-    click.echo(
-        f"\nName clash: the new leaf slug is already used by "
-        f"{n} existing entit{'y' if n == 1 else 'ies'}:"
-    )
-    for peer in plan.collisions:
-        click.echo(f"  ! content/{peer}")
-    click.echo(
-        "  Existing bare links to those entities will be rewritten "
-        "to a longer disambiguating form."
-    )
-
 
 @cli.command()
 @click.argument("old_path")
@@ -411,7 +392,6 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
     cwd_kinds = kinds_root(root)
     target_dir = (cwd_content / old_path.rstrip("/")).resolve()
     new_display: dict[str, str] = {}
-    _slug_to_title = lambda s: " ".join(w.capitalize() for w in s.replace("_", "-").split("-") if w)
     if target_dir.is_dir() and (target_dir / "index.md").is_file():
         old_name = read_entity_display_name(target_dir)
         if old_name:
@@ -473,15 +453,8 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
 
     if plan.refs:
         click.echo(f"\nReferences to update ({len(plan.refs)}):")
-        for ref in plan.refs:
-            rel = ref.file.relative_to(root)
-            click.echo(f"  {rel}:{ref.line_no}")
-            old_line, new_line = format_diff_pair(
-                ref.old_text, ref.new_text,
-                indent="    ", color=use_color(),
-            )
-            click.echo(old_line)
-            click.echo(new_line)
+        for line in format_refs(plan.refs, root):
+            click.echo(line)
     else:
         click.echo("\nNo references found — only the folder will be renamed.")
 
@@ -490,7 +463,8 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
         for w in plan.warnings:
             click.echo(f"  ! {w}")
 
-    _print_collisions(plan)
+    for line in format_collision_warning(plan):
+        click.echo(line)
 
     if dry_run:
         click.echo("\n(dry run — no files changed)")
@@ -559,15 +533,8 @@ def move(ctx: click.Context, entity_path: str, new_parent: str, is_kind: bool, d
 
     if plan.refs:
         click.echo(f"\nReferences to update ({len(plan.refs)}):")
-        for ref in plan.refs:
-            rel = ref.file.relative_to(root)
-            click.echo(f"  {rel}:{ref.line_no}")
-            old_line, new_line = format_diff_pair(
-                ref.old_text, ref.new_text,
-                indent="    ", color=use_color(),
-            )
-            click.echo(old_line)
-            click.echo(new_line)
+        for line in format_refs(plan.refs, root):
+            click.echo(line)
     else:
         if is_kind:
             click.echo("\nNo reference rewrites needed (kinds are referenced by slug).")
@@ -579,7 +546,8 @@ def move(ctx: click.Context, entity_path: str, new_parent: str, is_kind: bool, d
         for w in plan.warnings:
             click.echo(f"  ! {w}")
 
-    _print_collisions(plan)
+    for line in format_collision_warning(plan):
+        click.echo(line)
 
     if dry_run:
         click.echo("\n(dry run — no files changed)")
@@ -688,7 +656,8 @@ def crosslink(
 
     if dry_run:
         click.echo("\n(dry run — no files changed)")
-        _print_crosslink_warnings(actionable)
+        for line in format_crosslink_warnings(actionable):
+            click.echo(line)
         return
 
     if not yes:
@@ -702,30 +671,8 @@ def crosslink(
             sys.exit(1)
 
     click.echo(f"\nDone.  Updated {len(actionable)} article(s).")
-    _print_crosslink_warnings(actionable)
-
-
-def _print_crosslink_warnings(plans) -> None:
-    """Print a per-term summary of any `warn:` matches that were linked.
-
-    Reads ``warn_terms`` off each :class:`CrosslinkEdit` in *plans* and
-    prints one section grouped by term, listing every article/line
-    where the term was auto-linked.  Silent when no warnings fired.
-    """
-    by_term: dict[str, list[tuple[str, str, int]]] = {}
-    for plan in plans:
-        for edit in plan.edits:
-            for term in edit.warn_terms:
-                by_term.setdefault(term, []).append(
-                    (plan.article_id, plan.md_file.name, edit.line_no)
-                )
-    if not by_term:
-        return
-        click.echo("\nWarnings (terms flagged in content_meta/bt.yml `crosslink.warn`):")
-    for term in sorted(by_term):
-        click.echo(f"  '{term}' linked in:")
-        for article_id, md_name, line_no in by_term[term]:
-            click.echo(f"    content/{article_id}/{md_name}:{line_no}")
+    for line in format_crosslink_warnings(actionable):
+        click.echo(line)
 
 
 # ---------------------------------------------------------------------------

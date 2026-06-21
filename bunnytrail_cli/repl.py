@@ -27,7 +27,10 @@ from .helpers import (
     execute_crosslink,
     execute_move,
     execute_rename,
+    format_collision_warning,
+    format_crosslink_warnings,
     format_diff_pair,
+    format_refs,
     is_entity_folder,
     iter_entity_md_files,
     iter_kind_md_files,
@@ -36,11 +39,14 @@ from .helpers import (
     list_kinds_tree,
     list_tree,
     load_world_config,
+    parse_relation_entries,
     plan_crosslink,
     plan_crosslink_folder,
     plan_move,
     plan_move_kind,
     plan_rename,
+    resolve_content_path,
+    slug_to_title,
     use_color,
     write_frontmatter_md,
 )
@@ -680,29 +686,7 @@ def _prompt_single_field(
         if (v := get(p.slug))
     }
     # Preserve existing relation_entries when editing a single field
-    relation_entries: list[dict[str, str]] = []
-    in_rel = False
-    cur: dict[str, str] = {}
-    for line in fm_lines:
-        s = line.strip()
-        if s == "relations:":
-            in_rel = True
-            continue
-        if in_rel:
-            if s.startswith("- kind:"):
-                if cur:
-                    relation_entries.append(cur)
-                cur = {"kind": s[len("- kind:"):].strip()}
-            elif s.startswith("kind:"):
-                cur["kind"] = s[len("kind:"):].strip()
-            elif s.startswith("target:"):
-                cur["target"] = s[len("target:"):].strip()
-            elif s.startswith("qualifier:"):
-                cur["qualifier"] = s[len("qualifier:"):].strip()
-            elif s and not s.startswith("-"):
-                in_rel = False
-    if cur:
-        relation_entries.append(cur)
+    relation_entries: list[dict[str, str]] = parse_relation_entries(fm_lines)
 
     if field == "name":
         val = _ask("name", default=name)
@@ -756,10 +740,7 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
     # ------------------------------------------------------------------ helpers
 
     def _resolve(raw: str) -> Path:
-        raw = raw.rstrip("/")
-        if raw.startswith("/"):
-            return (content / raw.lstrip("/")).resolve()
-        return (cwd / raw).resolve()
+        return resolve_content_path(raw, cwd=cwd, content=content)
 
     def _read_entity(md_file: Path) -> tuple[list[str], str] | None:
         """Return (fm_lines, body) or None on error."""
@@ -964,6 +945,24 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
             print(f"  updated {md_file.relative_to(project)}")
 
 
+_ENTITY_BUILTINS = ["name", "kind", "summary", "class"]
+_KIND_FIELDS = ["singular", "plural", "description"]
+
+
+def _build_field_choices(world_cfg) -> list[str]:
+    """Return the ordered field-name list used by check/strip prompts."""
+    all_world_slugs = list({p.slug for p in world_cfg.applicable_properties("")})
+    return (
+        _KIND_FIELDS
+        + [s for s in _ENTITY_BUILTINS if s not in _KIND_FIELDS]
+        + [s for s in all_world_slugs if s not in _ENTITY_BUILTINS and s not in _KIND_FIELDS]
+    )
+
+
+def _confirmed(answer: "str | None") -> bool:
+    """Return True when *answer* is an affirmative yes/y response."""
+    return bool(answer) and answer.lower() in ("y", "yes")
+
 
 def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
     from .helpers import (  # type: ignore[attr-defined]
@@ -973,19 +972,11 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         split_frontmatter,
     )
 
-    _ENTITY_BUILTINS = ["name", "kind", "summary", "class"]
-    _KIND_FIELDS = ["singular", "plural", "description"]
-
     world_cfg = load_world_config(project)
     kinds = kinds_root(project)
 
     # --------------------------------------------------------- ask what to check
-    all_world_slugs = list({p.slug for p in world_cfg.applicable_properties("")})
-    field_choices = (
-        _KIND_FIELDS
-        + [s for s in _ENTITY_BUILTINS if s not in _KIND_FIELDS]
-        + [s for s in all_world_slugs if s not in _ENTITY_BUILTINS and s not in _KIND_FIELDS]
-    )
+    field_choices = _build_field_choices(world_cfg)
     field = _ask("check what?", completer=field_choices)  # type: ignore[arg-type]
     if not field:
         return
@@ -998,7 +989,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         if is_kind_field:
             target = (kinds / raw).resolve()
         else:
-            target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+            target = resolve_content_path(raw, cwd=cwd, content=content)
     else:
         if is_kind_field:
             raw = _ask("kinds path", complete_from=kinds, default=".")
@@ -1010,8 +1001,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
             raw = _ask("path", complete_from_cwd=(cwd, content))
             if not raw:
                 return
-            raw = raw.rstrip("/")
-            target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+            target = resolve_content_path(raw, cwd=cwd, content=content)
 
     if not target.is_dir():
         print(f"  not a directory: {raw}")
@@ -1043,7 +1033,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         print("\n".join(f"  {line}" for line in missing))
 
         answer = _ask(f"\n  add {field!r} to these now?", completer=["y", "n"], default="n")
-        if not answer or answer.lower() not in ("y", "yes"):
+        if not _confirmed(answer):
             return
 
         for yaml_file in missing_files:
@@ -1114,7 +1104,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
 
     # ---------------------------------------------------- offer to fill them in
     answer = _ask(f"\n  add {field!r} to these now?", completer=["y", "n"], default="n")
-    if not answer or answer.lower() not in ("y", "yes"):
+    if not _confirmed(answer):
         return
 
     for ent_dir in missing_dirs:
@@ -1144,19 +1134,11 @@ def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         split_frontmatter,
     )
 
-    _ENTITY_BUILTINS = ["name", "kind", "summary", "class"]
-    _KIND_FIELDS = ["singular", "plural", "description"]
-
     world_cfg = load_world_config(project)
     kinds = kinds_root(project)
 
     # -------------------------------------------------------- ask what to strip
-    all_world_slugs = list({p.slug for p in world_cfg.applicable_properties("")})
-    field_choices = (
-        _KIND_FIELDS
-        + [s for s in _ENTITY_BUILTINS if s not in _KIND_FIELDS]
-        + [s for s in all_world_slugs if s not in _ENTITY_BUILTINS and s not in _KIND_FIELDS]
-    )
+    field_choices = _build_field_choices(world_cfg)
     field = _ask("strip what?", completer=field_choices)  # type: ignore[arg-type]
     if not field:
         return
@@ -1169,7 +1151,7 @@ def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         if is_kind_field:
             target = (kinds / raw).resolve()
         else:
-            target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+            target = resolve_content_path(raw, cwd=cwd, content=content)
     else:
         if is_kind_field:
             raw = _ask("kinds path", complete_from=kinds, default=".")
@@ -1181,8 +1163,7 @@ def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None
             raw = _ask("path", complete_from_cwd=(cwd, content))
             if not raw:
                 return
-            raw = raw.rstrip("/")
-            target = ((cwd / raw) if not raw.startswith("/") else (content / raw.lstrip("/"))).resolve()
+            target = resolve_content_path(raw, cwd=cwd, content=content)
 
     if not target.is_dir():
         print(f"  not a directory: {raw}")
@@ -1214,7 +1195,7 @@ def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         print("\n".join(f"  {line}" for line in has_field))
 
         answer = _ask(f"\n  remove {field!r} from all of these?", completer=["y", "n"], default="n")
-        if not answer or answer.lower() not in ("y", "yes"):
+        if not _confirmed(answer):
             return
 
         prefix = f"{field}:"
@@ -1271,7 +1252,7 @@ def _cmd_strip(project: Path, cwd: Path, content: Path, args: list[str]) -> None
 
     # --------------------------------------------------------- confirm
     answer = _ask(f"\n  remove {field!r} from all of these?", completer=["y", "n"], default="n")
-    if not answer or answer.lower() not in ("y", "yes"):
+    if not _confirmed(answer):
         return
 
     # --------------------------------------------------------- strip
@@ -1347,9 +1328,8 @@ def _cmd_cd(cwd: Path, content: Path, args: list[str]) -> Path:
     return candidate.resolve()
 
 
-def _slug_to_title(slug: str) -> str:
-    """Convert a slug like 'solar-system' or 'dark_forest' to 'Solar System'."""
-    return " ".join(w.capitalize() for w in slug.replace("_", "-").split("-") if w)
+def _slug_to_title(slug: str) -> str:  # kept as shim; prefer slug_to_title from helpers
+    return slug_to_title(slug)
 
 
 def _cmd_add(
@@ -1499,24 +1479,7 @@ def _cmd_add(
 
                 relation_entries.append(entry)
 
-        # Resolve path: leading '/' means relative to content root, else relative to cwd
-        path = path.rstrip("/")
-        if path.startswith("/"):
-            base_dir = content / path.lstrip("/")
-        elif path in ("", "."):
-            base_dir = cwd
-        else:
-            # cwd-relative first (completer produces cwd-relative paths);
-            # fall back to content-relative for absolute-style suggestions from
-            # _KindSuggestedPathCompleter (which yields content-relative strings).
-            cwd_abs = (cwd / path).resolve()
-            content_abs = (content / path).resolve()
-            if cwd_abs.exists():
-                base_dir = cwd_abs
-            elif content_abs.exists():
-                base_dir = content_abs
-            else:
-                base_dir = cwd_abs  # neither exists; will mkdir under cwd
+        base_dir = resolve_content_path(path, cwd=cwd, content=content)
         entity_dir = base_dir / slug.rstrip("/")
         md_file = entity_dir / "index.md"
         if md_file.exists():
@@ -1527,27 +1490,12 @@ def _cmd_add(
             print(f"  warning: no kind '{kind_id}' found under content_meta/kinds/")
 
         entity_dir.mkdir(parents=True, exist_ok=True)
-        fm = f"name: {name}\nkind: {kind_id}"
-        if entity_class:
-            entity_class = entity_class.strip("/")
-            fm += f"\nclass: {entity_class}"
-        if summary:
-            fm += f"\nsummary: {summary}"
-        for prop_slug, prop_val in prop_values.items():
-            # Quote values that contain special YAML characters
-            if any(c in prop_val for c in (':',  '#', '[', ']', '{', '}', '&', '*', '!', '|', '>', "'", '"')):
-                fm += f'\n{prop_slug}: "{prop_val}"'
-            else:
-                fm += f"\n{prop_slug}: {prop_val}"
-        if relation_entries:
-            fm += "\nrelations:"
-            for entry in relation_entries:
-                fm += f"\n  - kind: {entry['kind']}"
-                fm += f"\n    target: {entry['target']}"
-                if "qualifier" in entry:
-                    fm += f"\n    qualifier: {entry['qualifier']}"
-        write_frontmatter_md(md_file, fm)
-        print(f"  created {md_file.relative_to(project)}")
+        _write_entity_file(
+            entity_dir / "index.md",
+            name, kind_id, entity_class or "", summary or "",
+            prop_values, relation_entries, body="",
+        )
+        print(f"  created {(entity_dir / 'index.md').relative_to(project)}")
         return None
 
     if sub == "collection":
@@ -1572,22 +1520,7 @@ def _cmd_add(
 
         description = _ask("description (optional)")  # empty → omitted
 
-        # Resolve path the same way add entity does
-        path = path.rstrip("/")
-        if path.startswith("/"):
-            base_dir = content / path.lstrip("/")
-        elif path in ("", "."):
-            base_dir = cwd
-        else:
-            cwd_abs = (cwd / path).resolve()
-            content_abs = (content / path).resolve()
-            if cwd_abs.exists():
-                base_dir = cwd_abs
-            elif content_abs.exists():
-                base_dir = content_abs
-            else:
-                base_dir = cwd_abs  # neither exists; will mkdir under cwd
-
+        base_dir = resolve_content_path(path, cwd=cwd, content=content)
         coll_dir = base_dir / slug.rstrip("/")
         md_file = coll_dir / "_collection.md"
         if md_file.exists():
@@ -1720,13 +1653,11 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
             return
 
     def _resolve_content(p: str) -> str:
-        p = p.rstrip("/")
-        if p.startswith("/"):
-            return p.lstrip("/")
-        cwd_abs = (cwd / p).resolve()
-        if cwd_abs.is_dir() and cwd_abs.is_relative_to(content):
-            return str(cwd_abs.relative_to(content))
-        return p
+        abs_path = resolve_content_path(p, cwd=cwd, content=content)
+        try:
+            return str(abs_path.relative_to(content))
+        except ValueError:
+            return p.rstrip("/").lstrip("/")
 
     def _resolve_kinds(p: str) -> str:
         p = p.rstrip("/")
@@ -1754,15 +1685,8 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
 
     if plan.refs:
         print(f"\n  References to update ({len(plan.refs)}):")
-        for ref in plan.refs:
-            rel = ref.file.relative_to(project)
-            print(f"    {rel}:{ref.line_no}")
-            old_line, new_line = format_diff_pair(
-                ref.old_text, ref.new_text,
-                indent="      ", color=use_color(),
-            )
-            print(old_line)
-            print(new_line)
+        for line in format_refs(plan.refs, project, indent="    "):
+            print(line)
     else:
         if is_kind:
             print("  No reference rewrites needed (kinds are referenced by slug).")
@@ -1774,10 +1698,11 @@ def _cmd_move(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
         for w in plan.warnings:
             print(f"    ! {w}")
 
-    _print_collisions(plan)
+    for line in format_collision_warning(plan):
+        print(line)
 
     confirm = _ask("\n  Proceed? [y/N]")
-    if not confirm or confirm.lower() not in ("y", "yes"):
+    if not _confirmed(confirm):
         print("  Cancelled.")
         return
 
@@ -1877,15 +1802,8 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
 
     if plan.refs:
         print(f"\n  References to update ({len(plan.refs)}):")
-        for ref in plan.refs:
-            rel = ref.file.relative_to(project)
-            print(f"    {rel}:{ref.line_no}")
-            old_line, new_line = format_diff_pair(
-                ref.old_text, ref.new_text,
-                indent="      ", color=use_color(),
-            )
-            print(old_line)
-            print(new_line)
+        for line in format_refs(plan.refs, project, indent="    "):
+            print(line)
     else:
         print("  No references found — only the folder will be renamed.")
 
@@ -1894,10 +1812,11 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
         for w in plan.warnings:
             print(f"    ! {w}")
 
-    _print_collisions(plan)
+    for line in format_collision_warning(plan):
+        print(line)
 
     confirm = _ask("\n  Proceed? [y/N]")
-    if not confirm or confirm.lower() not in ("y", "yes"):
+    if not _confirmed(confirm):
         print("  Cancelled.")
         return
 
@@ -1929,15 +1848,7 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str]) -> 
     guides_dir = (project / "content_meta" / "guides").resolve()
 
     def _resolve(p: str) -> str:
-        p = p.rstrip("/")
-        if Path(p).is_absolute():
-            cand = Path(p).resolve()
-        elif p.startswith("/"):
-            cand = (content / p.lstrip("/")).resolve()
-        else:
-            # cwd-relative first, content-relative fallback
-            cwd_abs = (cwd / p).resolve()
-            cand = cwd_abs if cwd_abs.is_dir() else (content / p).resolve()
+        cand = resolve_content_path(p, cwd=cwd, content=content)
         if cand.is_dir():
             if cand == guides_dir or guides_dir in cand.parents:
                 rel = cand.relative_to(guides_dir)
@@ -1994,7 +1905,7 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str]) -> 
             print(new_line)
 
     confirm = _ask("\n  Proceed? [y/N]")
-    if not confirm or confirm.lower() not in ("y", "yes"):
+    if not _confirmed(confirm):
         print("  Cancelled.")
         return
 
@@ -2006,41 +1917,8 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str]) -> 
             return
 
     print(f"  Done.  Updated {len(actionable)} article(s).")
-    _print_crosslink_warnings(actionable)
-
-
-def _print_collisions(plan) -> None:
-    peers = getattr(plan, "collisions", None) or []
-    if not peers:
-        return
-    n = len(peers)
-    print(
-        f"\n  Name clash: the new leaf slug is already used by "
-        f"{n} existing entit{'y' if n == 1 else 'ies'}:"
-    )
-    for peer in peers:
-        print(f"    ! content/{peer}")
-    print(
-        "    Existing bare links to those entities will be rewritten "
-        "to a longer disambiguating form."
-    )
-
-
-def _print_crosslink_warnings(plans) -> None:
-    by_term: dict[str, list[tuple[str, str, int]]] = {}
-    for plan in plans:
-        for edit in plan.edits:
-            for term in edit.warn_terms:
-                by_term.setdefault(term, []).append(
-                    (plan.article_id, plan.md_file.name, edit.line_no)
-                )
-    if not by_term:
-        return
-    print("\n  Warnings (terms flagged in content_meta/bt.yml `crosslink.warn`):")
-    for term in sorted(by_term):
-        print(f"    '{term}' linked in:")
-        for article_id, md_name, line_no in by_term[term]:
-            print(f"      content/{article_id}/{md_name}:{line_no}")
+    for line in format_crosslink_warnings(actionable):
+        print(line)
 
 
 def _cmd_help() -> None:
