@@ -954,16 +954,16 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                     print(f"  current relations: {old_rels}")
                 print("  relations — re-enter all (empty kind to finish):")
                 while True:
-                    rel_kind = _ask("  rel kind", completer=applicable_rel_slugs)  # type: ignore[arg-type]
+                    rel_kind = _ask("  kind", completer=applicable_rel_slugs)  # type: ignore[arg-type]
                     if not rel_kind:
                         break
                     rel_def = rel_by_slug.get(rel_kind)
                     codomain = rel_def.codomain if rel_def else []
                     if codomain:
                         tc = _KindSuggestedPathCompleter(content, cwd, codomain)
-                        rel_target = _ask("  rel target", completer=tc)
+                        rel_target = _ask("  target", completer=tc)
                     else:
-                        rel_target = _ask("  rel target", complete_from_cwd=(cwd, content))
+                        rel_target = _ask("  target", complete_from_cwd=(cwd, content))
                     if not rel_target:
                         break
                     entry: dict[str, str] = {"kind": rel_kind, "target": to_content_id(rel_target, cwd=cwd, content=content)}
@@ -1486,7 +1486,7 @@ def _cmd_add(
         if applicable_rel_slugs:
             print("  relations — enter a relation kind and target (empty kind to finish):")
             while True:
-                rel_kind = _ask("  rel kind", completer=applicable_rel_slugs)  # type: ignore[arg-type]
+                rel_kind = _ask("  kind", completer=applicable_rel_slugs)  # type: ignore[arg-type]
                 if not rel_kind:
                     break
                 # Narrow target suggestions by the relation's codomain (if any)
@@ -1500,9 +1500,9 @@ def _cmd_add(
                         f"  (Tab to see targets for '{rel_kind}'"
                         f"; kinds: {', '.join(codomain)})"
                     )
-                    rel_target = _ask("  rel target", completer=target_completer)
+                    rel_target = _ask("  target", completer=target_completer)
                 else:
-                    rel_target = _ask("  rel target", complete_from_cwd=(cwd, content))
+                    rel_target = _ask("  target", complete_from_cwd=(cwd, content))
                 if not rel_target:
                     break
                 entry: "dict[str, str]" = {"kind": rel_kind, "target": to_content_id(rel_target, cwd=cwd, content=content)}
