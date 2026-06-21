@@ -250,57 +250,26 @@ class _PathCompleter(Completer):
 class _KindCompleter(Completer):
     """Completer for the entity ``kind:`` prompt.
 
-    Lets the user navigate the kinds tree (``natural/``, ``natural/character/``,
-    ``natural/character/person/``) for discoverability, but when a leaf kind
-    folder is selected (one that contains ``_kind.yaml``) the completion text
-    is replaced with just the leaf slug (e.g. ``person``), since that is what
-    ``kind:`` stores.
-
-    When a folder has ``_kind.yaml`` AND child kind subfolders (i.e. it is both
-    a kind and a parent of sub-kinds), two completions are offered:
-      - the leaf slug (accepting this kind directly)
-      - ``folder/`` (to drill into the sub-kinds)
+    Navigates the kinds tree like a path completer (``natural/``,
+    ``natural/character/``, ``natural/character/person/``).  The full
+    path stays in the buffer while the user drills down; the leaf slug
+    is extracted from the final value by the caller via
+    ``value.split("/")[-1]``.
     """
 
     def __init__(self, kinds_base: Path) -> None:
         self._base = kinds_base
-
-    @staticmethod
-    def _has_child_kinds(path: Path) -> bool:
-        """True if *path* has at least one direct child containing a _kind.yaml."""
-        try:
-            return any(
-                (child / "_kind.yaml").is_file()
-                for child in path.iterdir()
-                if child.is_dir() and not child.name.startswith(".")
-            )
-        except (PermissionError, FileNotFoundError):
-            return False
 
     def get_completions(
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
         text = document.text_before_cursor
         for replacement, display in _path_completions(text, self._base):
-            candidate_dir = self._base / replacement.rstrip("/")
-            is_kind = (candidate_dir / "_kind.yaml").is_file()
-            has_children = self._has_child_kinds(candidate_dir)
-
-            if is_kind:
-                # Offer the leaf slug so the user can accept this kind directly
-                leaf_slug = candidate_dir.name
-                yield Completion(
-                    leaf_slug,
-                    start_position=-len(text),
-                    display=f"{display}  [{leaf_slug}]",
-                )
-            if not is_kind or has_children:
-                # Offer the navigable path so the user can drill into sub-kinds
-                yield Completion(
-                    replacement,
-                    start_position=-len(text),
-                    display=display,
-                )
+            yield Completion(
+                replacement,
+                start_position=-len(text),
+                display=display,
+            )
 
 
 class _CwdPathCompleter(Completer):
@@ -498,13 +467,8 @@ class _ShellCompleter(Completer):
                 if sub == "entity":
                     # new order: add entity <kind> <slug> <name> <path>
                     if len(tokens) == 3:
-                        # arg 1: kind — path-navigable, resolves to leaf slug
-                        for replacement, display in _path_completions(fragment, self._kinds):
-                            candidate = self._kinds / replacement.rstrip("/")
-                            if (candidate / "_kind.yaml").is_file():
-                                yield Completion(candidate.name, start_position=frag_start, display=f"{display}  [{candidate.name}]")
-                            else:
-                                yield Completion(replacement, start_position=frag_start, display=display)
+                        # arg 1: kind — path-navigable, leaf slug extracted by handler
+                        yield from _yield_paths(fragment, self._kinds, frag_start)
                     elif len(tokens) == 6:
                         # arg 4: path (after kind, slug, name)
                         yield from _yield_paths(fragment, self.cwd, frag_start)
@@ -783,7 +747,7 @@ def _prompt_single_field(
         val = _ask("kind", completer=_KindCompleter(kinds), default=kind_val)
         if val is None:
             return False
-        kind_val = val.split("/")[-1]
+        kind_val = val.rstrip("/").split("/")[-1]
         kind_id = kind_val
     elif field == "summary":
         val = _ask("summary (optional)", default=summary)
@@ -955,7 +919,7 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
             kind = _ask("kind", completer=_KindCompleter(kinds), default=kind_id)
             if kind is None:
                 return
-            kind_id = kind.split("/")[-1]
+            kind_id = kind.rstrip("/").split("/")[-1]
 
             summary = _ask("summary (optional)", default=get("summary"))
             if summary is None:
@@ -1459,7 +1423,7 @@ def _cmd_add(
             kind_arg = _ask("kind", completer=_KindCompleter(kinds))
             if not kind_arg:
                 return None
-        kind_id = kind_arg.split("/")[-1]
+        kind_id = kind_arg.rstrip("/").split("/")[-1]
 
         # 2. Ask path, with kind-aware suggestions
         if path is None:
