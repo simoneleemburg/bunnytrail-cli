@@ -256,30 +256,46 @@ class _KindCompleter(Completer):
     is replaced with just the leaf slug (e.g. ``person``), since that is what
     ``kind:`` stores.
 
-    Non-leaf folders complete normally with a trailing ``/`` so the user can
-    keep drilling down.
+    When a folder has ``_kind.yaml`` AND child kind subfolders (i.e. it is both
+    a kind and a parent of sub-kinds), two completions are offered:
+      - the leaf slug (accepting this kind directly)
+      - ``folder/`` (to drill into the sub-kinds)
     """
 
     def __init__(self, kinds_base: Path) -> None:
         self._base = kinds_base
+
+    @staticmethod
+    def _has_child_kinds(path: Path) -> bool:
+        """True if *path* has at least one direct child containing a _kind.yaml."""
+        try:
+            return any(
+                (child / "_kind.yaml").is_file()
+                for child in path.iterdir()
+                if child.is_dir() and not child.name.startswith(".")
+            )
+        except (PermissionError, FileNotFoundError):
+            return False
 
     def get_completions(
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
         text = document.text_before_cursor
         for replacement, display in _path_completions(text, self._base):
-            # Check if this candidate is a leaf kind (has _kind.yaml)
             candidate_dir = self._base / replacement.rstrip("/")
-            if (candidate_dir / "_kind.yaml").is_file():
-                # Leaf kind: replace the whole typed text with just the slug
+            is_kind = (candidate_dir / "_kind.yaml").is_file()
+            has_children = self._has_child_kinds(candidate_dir)
+
+            if is_kind:
+                # Offer the leaf slug so the user can accept this kind directly
                 leaf_slug = candidate_dir.name
                 yield Completion(
                     leaf_slug,
                     start_position=-len(text),
                     display=f"{display}  [{leaf_slug}]",
                 )
-            else:
-                # Intermediate folder: navigate normally
+            if not is_kind or has_children:
+                # Offer the navigable path so the user can drill into sub-kinds
                 yield Completion(
                     replacement,
                     start_position=-len(text),
