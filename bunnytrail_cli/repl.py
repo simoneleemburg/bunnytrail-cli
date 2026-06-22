@@ -68,6 +68,7 @@ TOP_LEVEL_COMMANDS = [
     "add",
     "edit",
     "check",
+    "check-relations",
     "strip",
     "move",
     "rename",
@@ -497,6 +498,10 @@ class _ShellCompleter(Completer):
 
         elif cmd == "crosslink":
             if len(tokens) in (2, 3):
+                yield from _yield_paths(fragment, self.cwd, frag_start)
+
+        elif cmd == "check-relations":
+            if len(tokens) == 2:
                 yield from _yield_paths(fragment, self.cwd, frag_start)
 
 
@@ -1966,6 +1971,204 @@ def _cmd_crosslink(project: Path, cwd: Path, content: Path, args: list[str]) -> 
         print(line)
 
 
+def _cmd_check_relations(
+    project: Path, cwd: Path, content: Path, args: list[str]
+) -> None:
+    """Check entities for missing relations defined in the ontology.
+
+    For every entity under the target path:
+      - Loads its kind and looks up all applicable relations.
+      - Reports any relation kinds that are not yet present in the entity's
+        ``relations:`` frontmatter list.
+    Then offers to fill in the missing ones interactively, one entity at a time.
+    """
+    from .helpers import (  # type: ignore[attr-defined]
+        frontmatter_lines,
+        _parse_yaml_field,
+        is_collection_folder,
+        split_frontmatter,
+    )
+
+    world_cfg = load_world_config(project)
+    all_relations = world_cfg.relations
+
+    if not all_relations:
+        print("  no relations defined in the ontology")
+        return
+
+    # ---------------------------------------------------------------- resolve path
+    if args:
+        raw = args[0].rstrip("/")
+        target = resolve_content_path(raw, cwd=cwd, content=content)
+    else:
+        raw = _ask("path", complete_from_cwd=(cwd, content))
+        if not raw:
+            return
+        target = resolve_content_path(raw, cwd=cwd, content=content)
+
+    if not target.is_dir():
+        print(f"  not a directory: {raw}")
+        return
+
+    # ---------------------------------------------------------------- collect entities
+    entity_dirs: list[Path] = []
+    if is_entity_folder(target):
+        entity_dirs = [target]
+    elif is_collection_folder(target) or target == content:
+        for md_file in sorted(target.rglob("index.md")):
+            if is_entity_folder(md_file.parent):
+                entity_dirs.append(md_file.parent)
+    else:
+        print(f"  not an entity or collection folder: {raw}")
+        return
+
+    if not entity_dirs:
+        print("  (no entities found)")
+        return
+
+    # ---------------------------------------------------------------- scan
+    # Each entry: (ent_dir, missing_rel_slugs)
+    Report = list[tuple[Path, list[str]]]
+    report: Report = []
+
+    for ent_dir in entity_dirs:
+        try:
+            text = (ent_dir / "index.md").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        fm = frontmatter_lines(text)
+        kind_id = _parse_yaml_field(fm, "kind")
+        applicable = world_cfg.applicable_relations(kind_id)
+        if not applicable:
+            continue
+        existing_entries = parse_relation_entries(fm)
+        existing_kinds = {e["kind"] for e in existing_entries}
+        missing = [r.slug for r in applicable if r.slug not in existing_kinds]
+        if missing:
+            report.append((ent_dir, missing))
+
+    if not report:
+        print("  all entities have all applicable relations")
+        return
+
+    # ---------------------------------------------------------------- report
+    print(f"\n  entities with missing relations ({len(report)}):")
+    for ent_dir, missing_slugs in report:
+        try:
+            text = (ent_dir / "index.md").read_text(encoding="utf-8")
+            fm = frontmatter_lines(text)
+            name = _parse_yaml_field(fm, "name") or ent_dir.name
+        except OSError:
+            name = ent_dir.name
+        rel = ent_dir.relative_to(content)
+        print(f"  - {name}  ({rel})")
+        for slug in missing_slugs:
+            print(f"      missing: {slug}")
+
+    # ---------------------------------------------------------------- offer to fill
+    answer = _ask("\n  fill in missing relations now?", completer=["y", "n"], default="n")
+    if not _confirmed(answer):
+        return
+
+    kinds = kinds_root(project)
+    rel_by_slug = {r.slug: r for r in all_relations}
+
+    for ent_dir, missing_slugs in report:
+        md_file = ent_dir / "index.md"
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"  cannot read {md_file}: {exc}")
+            continue
+        fm_str, body = split_frontmatter(text)
+        fm_lines = (fm_str or "").splitlines()
+        get = lambda f, _fl=fm_lines: _parse_yaml_field(_fl, f)
+
+        name = get("name") or ent_dir.name
+        kind_id = get("kind")
+        applicable = world_cfg.applicable_relations(kind_id)
+        existing_entries = parse_relation_entries(fm_lines)
+        existing_kinds = {e["kind"] for e in existing_entries}
+
+        print(f"\n  {name}  ({ent_dir.relative_to(content)})")
+
+        new_entries: list[dict[str, str]] = list(existing_entries)
+        for rel_slug in missing_slugs:
+            # Re-check after possible earlier additions in this session
+            if rel_slug in {e["kind"] for e in new_entries}:
+                continue
+            rel_def = rel_by_slug.get(rel_slug)
+            codomain = rel_def.codomain if rel_def else []
+            qualifier_required = rel_def.qualifier_required if rel_def else False
+            qualifier_domain = rel_def.qualifier_domain if rel_def else []
+
+            print(f"  relation: {rel_slug}")
+
+            # How many instances to add (loop until the user leaves target blank)
+            while True:
+                if codomain:
+                    tc = _KindSuggestedPathCompleter(content, cwd, codomain)
+                    print(
+                        f"  (Tab to see targets for '{rel_slug}'"
+                        f"; kinds: {', '.join(codomain)})"
+                    )
+                    rel_target = _ask("  target (empty to skip)", completer=tc)
+                else:
+                    rel_target = _ask("  target (empty to skip)", complete_from_cwd=(cwd, content))
+
+                if not rel_target:
+                    break
+
+                entry: dict[str, str] = {
+                    "kind": rel_slug,
+                    "target": to_content_id(rel_target, cwd=cwd, content=content),
+                }
+
+                if qualifier_required:
+                    if qualifier_domain:
+                        q_completer = _KindSuggestedPathCompleter(content, cwd, qualifier_domain)
+                        print(
+                            f"  (qualifier required; Tab to see candidates"
+                            f"; kinds: {', '.join(qualifier_domain)})"
+                        )
+                        rel_qualifier = _ask("  qualifier", completer=q_completer)
+                    else:
+                        rel_qualifier = _ask("  qualifier", complete_from_cwd=(cwd, content))
+                    if rel_qualifier:
+                        entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
+
+                new_entries.append(entry)
+
+                # Ask whether to add another entry for the same relation kind
+                more = _ask(f"  add another '{rel_slug}'?", completer=["y", "n"], default="n")
+                if not _confirmed(more):
+                    break
+
+        # Write back only if we added something
+        if len(new_entries) > len(existing_entries):
+            # Re-read other fields so we can call _write_entity_file
+            summary = get("summary")
+            entity_class = get("class")
+            prop_values: dict[str, str] = {
+                p.slug: v
+                for p in world_cfg.applicable_properties(kind_id)
+                if (v := get(p.slug))
+            }
+            _write_entity_file(
+                md_file,
+                get("name") or ent_dir.name,
+                kind_id,
+                entity_class or "",
+                summary or "",
+                prop_values,
+                new_entries,
+                body,
+            )
+            print(f"  updated {md_file.relative_to(project)}")
+        else:
+            print(f"  (no changes for {name})")
+
+
 def _cmd_help() -> None:
     print(
         """
@@ -1976,6 +2179,7 @@ def _cmd_help() -> None:
   stats [path]                          entity / collection / kind counts (default: cwd)
   edit <path>                           edit entity or collection frontmatter
   check <path>                          list entities missing a world property
+  check-relations <path>                list entities missing ontology-defined relations; offer to fill them in
   strip <path>                          remove a property from all entities that have it
   cd <path>                             change directory (relative or from content root)
   cd ..                                 go up one level
@@ -2063,6 +2267,8 @@ def run_shell(project: Path) -> None:
             _cmd_edit(project, cwd, content, args)
         elif cmd == "check":
             _cmd_check(project, cwd, content, args)
+        elif cmd == "check-relations":
+            _cmd_check_relations(project, cwd, content, args)
         elif cmd == "strip":
             _cmd_strip(project, cwd, content, args)
         elif cmd == "tree":
