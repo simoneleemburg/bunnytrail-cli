@@ -40,6 +40,7 @@ from .helpers import (
     list_kinds_tree,
     list_tree,
     load_world_config,
+    auto_plural,
     parse_relation_entries,
     plan_crosslink,
     plan_crosslink_folder,
@@ -1611,9 +1612,9 @@ def _cmd_add(
                 return
 
         if plural is None:
-            plural = _ask("plural", default=f"{singular}s")
+            plural = _ask("plural", default=auto_plural(singular))
             if not plural:
-                plural = f"{singular}s"
+                plural = auto_plural(singular)
 
         description = _ask("description (optional)")
 
@@ -1818,7 +1819,7 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
         if kind_dir.is_dir() and (kind_dir / "_kind.yaml").is_file():
             old_singular, old_plural, old_description = read_kind_display_names(kind_dir)
             new_singular_default = _slug_to_title(new_slug)
-            new_plural_default = f"{new_singular_default}s"
+            new_plural_default = auto_plural(new_singular_default)
             if old_singular:
                 answer = _ask("new singular", default=new_singular_default)
                 if answer and answer != old_singular:

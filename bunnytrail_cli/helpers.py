@@ -2804,6 +2804,55 @@ def slug_to_title(slug: str) -> str:
     return " ".join(word.capitalize() for word in slug.replace("_", "-").split("-") if word)
 
 
+def auto_plural(singular: str) -> str:
+    """Return a best-guess English plural for *singular*.
+
+    Rules applied in order (case-preserving — the suffix match is done on
+    the lowercased form but the replacement preserves the original case):
+
+      1. Ends in -ss, -x, -z, -ch, -sh  →  + es   (e.g. Process→Processes, Fox→Foxes)
+      2. Ends in consonant + y           →  -y + ies (e.g. Category→Categories)
+      3. Ends in -fe                     →  -fe + ves (e.g. Life→Lives)  [not triggered for -ss above]
+      4. Ends in -f (not -ff)            →  -f + ves  (e.g. Leaf→Leaves)
+      5. Ends in -o after consonant      →  + es      (e.g. Hero→Heroes)  — common words only
+      6. Otherwise                       →  + s
+
+    The function does NOT try to handle true irregulars (person→people) or
+    all edge cases; it is only meant to give a sensible *default* that the
+    user can immediately override at the prompt.
+    """
+    if not singular:
+        return singular
+
+    low = singular.lower()
+
+    # ── Rule 1: sibilant endings → +es ────────────────────────────────────
+    if (low.endswith("ss") or low.endswith("x") or low.endswith("z")
+            or low.endswith("ch") or low.endswith("sh")):
+        return singular + "es"
+
+    # ── Rule 2: consonant + y → -ies ──────────────────────────────────────
+    _VOWELS = set("aeiou")
+    if low.endswith("y") and len(low) >= 2 and low[-2] not in _VOWELS:
+        return singular[:-1] + ("ies" if singular[-1].islower() else "IES")
+
+    # ── Rule 3: -fe → -ves ────────────────────────────────────────────────
+    if low.endswith("fe"):
+        return singular[:-2] + ("ves" if singular[-1].islower() else "VES")
+
+    # ── Rule 4: -f (not -ff) → -ves ───────────────────────────────────────
+    if low.endswith("f") and not low.endswith("ff"):
+        return singular[:-1] + ("ves" if singular[-1].islower() else "VES")
+
+    # ── Rule 5: consonant + o → +es (limited safe set) ────────────────────
+    _O_ES_ENDINGS = ("hero", "echo", "veto", "tomato", "potato", "torpedo")
+    if any(low.endswith(w) for w in _O_ES_ENDINGS):
+        return singular + "es"
+
+    # ── Default: +s ───────────────────────────────────────────────────────
+    return singular + "s"
+
+
 def _collection_title_ref(
     collection_md: Path,
     old_slug: str,
