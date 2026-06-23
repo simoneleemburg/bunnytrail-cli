@@ -2853,6 +2853,53 @@ def auto_plural(singular: str) -> str:
     return singular + "s"
 
 
+def expand_kind_slugs(kinds_root_path: Path, slugs: list[str]) -> set[str]:
+    """Return *slugs* plus every descendant kind slug found under *kinds_root_path*.
+
+    The kinds tree is a filesystem hierarchy where each ``_kind.yaml`` lives
+    inside a folder whose name **is** the kind slug, and nesting represents
+    the subkind relationship.  For example::
+
+        kinds/geographical/place/_kind.yaml          ← slug "place"
+        kinds/geographical/place/region/_kind.yaml   ← slug "region" (subkind of place)
+        kinds/geographical/place/settlement/_kind.yaml
+
+    Given ``slugs=["place"]`` this returns
+    ``{"place", "region", "settlement", "continent", …}`` — the full
+    transitive closure of descendants.
+
+    Non-existent slugs and lookup errors are silently ignored so the
+    completer degrades gracefully.
+    """
+    if not slugs or not kinds_root_path.is_dir():
+        return set(slugs)
+
+    result: set[str] = set(slugs)
+
+    # Build a slug → [child slugs] map from the kinds filesystem in one pass.
+    # Each _kind.yaml's parent folder is the kind; its grandparent folder is the
+    # parent kind (as long as the grandparent also has a _kind.yaml).
+    parent_to_children: dict[str, list[str]] = {}
+    for kind_yaml in kinds_root_path.rglob("_kind.yaml"):
+        child_slug = kind_yaml.parent.name
+        grandparent = kind_yaml.parent.parent
+        # Grandparent is the parent kind only if it too has a _kind.yaml
+        if (grandparent / "_kind.yaml").exists():
+            parent_slug = grandparent.name
+            parent_to_children.setdefault(parent_slug, []).append(child_slug)
+
+    # BFS / iterative expansion
+    queue = list(slugs)
+    while queue:
+        current = queue.pop()
+        for child in parent_to_children.get(current, []):
+            if child not in result:
+                result.add(child)
+                queue.append(child)
+
+    return result
+
+
 def _collection_title_ref(
     collection_md: Path,
     old_slug: str,

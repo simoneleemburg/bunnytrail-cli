@@ -23,10 +23,12 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.shortcuts import CompleteStyle
 
 from .helpers import (
+    auto_plural,
     content_root,
     execute_crosslink,
     execute_move,
     execute_rename,
+    expand_kind_slugs,
     format_collision_warning,
     format_crosslink_warnings,
     format_diff_pair,
@@ -40,7 +42,6 @@ from .helpers import (
     list_kinds_tree,
     list_tree,
     load_world_config,
-    auto_plural,
     parse_relation_entries,
     plan_crosslink,
     plan_crosslink_folder,
@@ -169,7 +170,8 @@ def _entity_parent_dirs_by_kind(
 ) -> list[str]:
     """
     Return content-relative parent-directory strings for all existing entities
-    whose ``kind:`` field matches any of *kind_ids*, ordered by proximity to *cwd*.
+    whose ``kind:`` field matches any of *kind_ids* **or any of their
+    descendant kinds**, ordered by proximity to *cwd*.
 
     *kind_ids* may be a single slug string or a list of slugs.  An empty list
     means no filtering — all entity parent dirs are returned.
@@ -179,7 +181,16 @@ def _entity_parent_dirs_by_kind(
 
     if isinstance(kind_ids, str):
         kind_ids = [kind_ids]
-    kind_set = set(kind_ids)  # empty set → accept all
+
+    # Expand to include subkinds so e.g. codomain=["place"] also matches
+    # entities with kind: region, settlement, planet, etc.
+    if kind_ids:
+        _kinds_root = kinds_root(content.parent)
+        expanded = expand_kind_slugs(_kinds_root, list(kind_ids))
+    else:
+        expanded = set(kind_ids)
+
+    kind_set = expanded  # empty set → accept all
 
     seen: set[str] = set()
     results: list[tuple[int, str]] = []
