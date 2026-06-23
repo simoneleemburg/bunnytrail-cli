@@ -579,6 +579,7 @@ def _ask(
     complete_from_cwd: Optional[tuple[Path, Path]] = None,
     complete_kinds: bool = False,
     default: str = "",
+    allow_empty: bool = False,
 ) -> Optional[str]:
     """
     Prompt for a single value with optional completion.
@@ -588,6 +589,9 @@ def _ask(
                           default; if the user types a leading '/', completes
                           from root instead.
     *completer*         — list of strings or a Completer instance.
+    *allow_empty*       — if True, blank input returns "" rather than falling
+                          back to the default (or None).  Use this when blank
+                          should mean "skip" rather than "use default".
     """
     hint = f" [{default}]" if default else ""
 
@@ -609,7 +613,11 @@ def _ask(
     )
     try:
         value = session.prompt(f"  {label}{hint}: ").strip()
-        return value if value else (default or None)
+        if value:
+            return value
+        if allow_empty:
+            return ""
+        return default or None
     except (EOFError, KeyboardInterrupt):
         print("  (cancelled)")
         return None
@@ -773,8 +781,14 @@ def _prompt_single_field(
     kind_id: str,
     fm_lines: list[str],
     body: str,
-) -> bool:
-    """Prompt for one field, patch it in place, write, return False on cancel."""
+) -> bool | None:
+    """Prompt for one field, patch it in place, write.
+
+    Returns:
+        True   – field was written successfully
+        False  – blank input: skip this entity, continue the loop
+        None   – user aborted (Ctrl+C / Ctrl+D): stop the whole loop
+    """
     from .helpers import _parse_yaml_field, extra_frontmatter_fields  # type: ignore[attr-defined]
     kinds = kinds_root(project)
     world_cfg = load_world_config(project)
@@ -796,26 +810,34 @@ def _prompt_single_field(
     relation_entries: list[dict[str, str]] = parse_relation_entries(fm_lines)
 
     if field == "name":
-        val = _ask("name", default=name)
+        val = _ask("name", default=name, allow_empty=True)
         if val is None:
+            return None
+        if not val:
             return False
         name = val
     elif field == "kind":
-        val = _ask("kind", completer=_KindCompleter(kinds), default=kind_val)
+        val = _ask("kind", completer=_KindCompleter(kinds), default=kind_val, allow_empty=True)
         if val is None:
+            return None
+        if not val:
             return False
         kind_val = val.rstrip("/").split("/")[-1]
         kind_id = kind_val
     elif field == "summary":
-        val = _ask("summary (optional)", default=summary)
+        val = _ask("summary (optional)", default=summary, allow_empty=True)
         if val is None:
+            return None
+        if not val:
             return False
         summary = val
     elif field == "class":
-        val = _ask("class", complete_from_cwd=(cwd, content), default=entity_class)
+        val = _ask("class", complete_from_cwd=(cwd, content), default=entity_class, allow_empty=True)
         if val is None:
+            return None
+        if not val:
             return False
-        entity_class = to_content_id(val, cwd=cwd, content=content) if val else ""
+        entity_class = to_content_id(val, cwd=cwd, content=content)
     elif field == "era":
         # Derive cluster from the md_file path
         try:
@@ -825,8 +847,10 @@ def _prompt_single_field(
         era_refs = world_cfg.era_config.refs_for_cluster(cluster)
         if era_refs:
             print(f"  (cluster: {cluster or '(unknown)'}  [{', '.join(era_refs)}])")
-        val = _ask("era (optional)", completer=era_refs if era_refs else None, default=entity_era)  # type: ignore[arg-type]
+        val = _ask("era (optional)", completer=era_refs if era_refs else None, default=entity_era, allow_empty=True)  # type: ignore[arg-type]
         if val is None:
+            return None
+        if not val:
             return False
         entity_era = val
     else:
@@ -834,15 +858,14 @@ def _prompt_single_field(
         prop_def = next((p for p in world_cfg.applicable_properties(kind_id) if p.slug == field), None)
         if prop_def is None:
             print(f"  unknown field: {field!r}")
-            return False
+            return None
         hint = f"  [{', '.join(prop_def.values[:4])}{'…' if len(prop_def.values) > 4 else ''}]" if prop_def.values else ""
-        val = _ask(f"{field} (optional){hint}", completer=prop_def.values if prop_def.values else None, default=get(field))  # type: ignore[arg-type]
+        val = _ask(f"{field} (optional){hint}", completer=prop_def.values if prop_def.values else None, default=get(field), allow_empty=True)  # type: ignore[arg-type]
         if val is None:
+            return None
+        if not val:
             return False
-        if val:
-            prop_values[field] = val
-        else:
-            prop_values.pop(field, None)
+        prop_values[field] = val
 
     _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body, era=entity_era or "", extra_fields=extra_fields)
     return True
@@ -1173,7 +1196,13 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         print(f"\n  missing {field!r}:")
         print("\n".join(f"  {line}" for line in missing))
 
-        answer = _ask(f"\n  add {field!r} to these now?", completer=["y", "n"], default="n")
+        while True:
+            answer = _ask(f"\n  add {field!r} to these now? [y/n]", completer=["y", "n"])
+            if answer is None:
+                return
+            if answer.lower() in ("y", "yes", "n", "no"):
+                break
+            print("  please enter y or n")
         if not _confirmed(answer):
             return
 
@@ -1259,7 +1288,13 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         print(f"  ({len(skipped)} entities skipped — {field!r} not applicable to their kind)")
 
     # ---------------------------------------------------- offer to fill them in
-    answer = _ask(f"\n  add {field!r} to these now?", completer=["y", "n"], default="n")
+    while True:
+        answer = _ask(f"\n  add {field!r} to these now? [y/n]", completer=["y", "n"])
+        if answer is None:
+            return
+        if answer.lower() in ("y", "yes", "n", "no"):
+            break
+        print("  please enter y or n")
     if not _confirmed(answer):
         return
 
@@ -1289,7 +1324,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
             if era_refs:
                 hint = f"  [{', '.join(era_refs)}]"
                 print(f"  cluster: {cluster or '(unknown)'}{hint}")
-            val = _ask("era", completer=era_refs if era_refs else None, default=era_default)  # type: ignore[arg-type]
+            val = _ask("era", completer=era_refs if era_refs else None, default=era_default, allow_empty=True)  # type: ignore[arg-type]
             if val is None:
                 return
             if not val:
@@ -1309,8 +1344,10 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
             )
         else:
             ok = _prompt_single_field(project, cwd, content, field, md_file, kind_id, fm_lines, body)
-            if not ok:
+            if ok is None:
                 return
+            if not ok:
+                continue
         print(f"  updated {md_file.relative_to(project)}")
 
 
