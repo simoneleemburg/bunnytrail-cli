@@ -1054,6 +1054,36 @@ class EraConfig:
         return ""
 
 
+def _build_child_to_parent(kinds_root_path: Path) -> dict[str, str]:
+    """Return a mapping of kind slug → parent kind slug for the whole tree.
+
+    Only direct parent relationships are stored; callers can walk the map
+    repeatedly to traverse ancestors.  Kind slugs with no parent kind (i.e.
+    top-level kinds) are not present as keys.
+    """
+    result: dict[str, str] = {}
+    if not kinds_root_path.is_dir():
+        return result
+    for kind_yaml in kinds_root_path.rglob("_kind.yaml"):
+        child_slug = kind_yaml.parent.name
+        grandparent = kind_yaml.parent.parent
+        if (grandparent / "_kind.yaml").exists():
+            result[child_slug] = grandparent.name
+    return result
+
+
+def _kind_and_ancestors(kind_id: str, child_to_parent: dict[str, str]) -> set[str]:
+    """Return *kind_id* plus all of its ancestor kind slugs."""
+    result: set[str] = set()
+    current = kind_id
+    while current:
+        if current in result:
+            break  # cycle guard
+        result.add(current)
+        current = child_to_parent.get(current, "")
+    return result
+
+
 @dataclass
 class WorldConfig:
     """Relations and properties loaded from the new ontology schema.
@@ -1070,32 +1100,38 @@ class WorldConfig:
     allow_undefined_relations: bool = False
     allow_undefined_properties: bool = False
     era_config: EraConfig = field(default_factory=lambda: EraConfig(definitions=[], per_cluster={}))
+    # child → parent kind slug map; built once from the kinds filesystem tree
+    _kind_ancestry: dict[str, str] = field(default_factory=dict)
 
     def applicable_relations(self, kind_id: str) -> list[RelationDef]:
-        """Relations whose ``domain`` includes *kind_id* or is unrestricted."""
-        return [r for r in self.relations if not r.domain or kind_id in r.domain]
+        """Relations whose ``domain`` includes *kind_id* or any of its ancestor
+        kind slugs, or relations that are unrestricted (empty domain).
+
+        This means a relation declared for ``domain: [event]`` correctly
+        matches an entity whose kind is ``migration-event`` (a subkind of
+        ``event``).
+        """
+        if not kind_id:
+            return [r for r in self.relations if not r.domain]
+        ancestors = _kind_and_ancestors(kind_id, self._kind_ancestry)
+        return [r for r in self.relations if not r.domain or ancestors & set(r.domain)]
 
     def applicable_properties(self, kind_id: str) -> list[PropertyDef]:
-        """Properties that apply to *kind_id*.
+        """Properties that apply to *kind_id* or any of its ancestor kinds.
 
-        Per the new ontology spec, a property declared on a kind applies
-        to that kind and all its descendants via the kind hierarchy.  The
-        CLI does not have access to the full kind hierarchy graph, so this
-        method uses a conservative approximation:
+        A property declared on a superkind applies to all its subkinds, so
+        we walk up the hierarchy and include any property whose
+        ``declaring_kind`` appears in the ancestor chain.
 
-          * Properties with no ``declaring_kind`` (loaded from the old
-            ``world.md`` style or from a root-level kind) are always
-            included.
-          * Properties where ``declaring_kind == kind_id`` are always
-            included.
-          * When *kind_id* is empty (unknown), all properties are returned
-            so callers can show the full set for completion purposes.
+        When *kind_id* is empty (unknown), all properties are returned so
+        callers can show the full set for completion purposes.
         """
         if not kind_id:
             return list(self.properties)
+        ancestors = _kind_and_ancestors(kind_id, self._kind_ancestry)
         return [
             p for p in self.properties
-            if not p.declaring_kind or p.declaring_kind == kind_id
+            if not p.declaring_kind or p.declaring_kind in ancestors
         ]
 
 
@@ -1402,6 +1438,7 @@ def load_world_config(project: Path) -> WorldConfig:
         allow_undefined_relations=allow_undef_rels,
         allow_undefined_properties=allow_undef_props,
         era_config=era_cfg,
+        _kind_ancestry=_build_child_to_parent(kinds),
     )
 
 
@@ -1458,6 +1495,71 @@ def _parse_yaml_field(lines: list[str], field: str) -> str:
         # Inline value (may be quoted)
         return rest.strip("\"'")
     return ""
+
+
+# Keys that _write_entity_file handles via dedicated parameters; anything else
+# is "extra" and should be preserved verbatim.
+_ENTITY_HANDLED_KEYS: frozenset[str] = frozenset(
+    ["name", "kind", "class", "summary", "era", "relations"]
+)
+
+# Keys that belong to _kind.yaml files, not entity index.md files
+_KIND_HANDLED_KEYS: frozenset[str] = frozenset(
+    ["singular", "plural", "description", "eraBounded"]
+)
+
+
+def extra_frontmatter_fields(
+    fm_lines: list[str],
+    prop_slugs: "set[str] | frozenset[str]",
+    extra_handled: "set[str] | frozenset[str] | None" = None,
+) -> dict[str, str]:
+    """Return top-level scalar frontmatter fields that are not handled by name.
+
+    Excludes the standard entity built-ins (``name``, ``kind``, ``class``,
+    ``summary``, ``era``, ``relations``) and any slugs in *prop_slugs*
+    (ontology-defined properties that are already collected separately).
+    Pass *extra_handled* to exclude additional keys (e.g. kind-file fields).
+
+    The values are returned as raw strings, preserving quotes where present.
+    Multi-line / block-scalar values are joined with a single space.
+
+    Only top-level keys are considered; indented lines (list items, nested
+    mappings) are ignored.
+    """
+    skip = _ENTITY_HANDLED_KEYS | set(prop_slugs)
+    if extra_handled:
+        skip |= set(extra_handled)
+
+    result: dict[str, str] = {}
+    i = 0
+    while i < len(fm_lines):
+        line = fm_lines[i]
+        # Top-level key: starts at column 0, matches "key: ..."
+        if line and line[0] not in (" ", "\t", "-", "#"):
+            colon = line.find(":")
+            if colon > 0:
+                key = line[:colon].strip()
+                rest = line[colon + 1:].strip()
+                if key not in skip:
+                    if rest in (">-", ">", "|", "|-"):
+                        # Block scalar — collect indented continuation
+                        parts: list[str] = []
+                        j = i + 1
+                        while j < len(fm_lines):
+                            cont = fm_lines[j]
+                            if cont and (cont[0] == " " or cont[0] == "\t"):
+                                parts.append(cont.strip())
+                                j += 1
+                            else:
+                                break
+                        result[key] = " ".join(parts)
+                        i = j
+                        continue
+                    else:
+                        result[key] = rest
+        i += 1
+    return result
 
 
 def collect_namespace_entities(project: Path, namespace_path: str) -> list[tuple[str, str]]:

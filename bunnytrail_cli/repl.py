@@ -735,6 +735,8 @@ def _write_entity_file(
     prop_values: dict[str, str],
     relation_entries: list[dict[str, str]],
     body: str,
+    era: str = "",
+    extra_fields: "dict[str, str] | None" = None,
 ) -> None:
     """Serialise entity frontmatter fields and write *md_file*."""
     fm = f"name: {name}\nkind: {kind_id}"
@@ -742,11 +744,16 @@ def _write_entity_file(
         fm += f"\nclass: {entity_class.strip('/')}"
     if summary:
         fm += f"\nsummary: {summary}"
+    if era:
+        fm += f"\nera: {era}"
     for prop_slug, prop_val in prop_values.items():
         if any(c in prop_val for c in (':', '#', '[', ']', '{', '}', '&', '*', '!', '|', '>', "'", '"')):
             fm += f'\n{prop_slug}: "{prop_val}"'
         else:
             fm += f"\n{prop_slug}: {prop_val}"
+    if extra_fields:
+        for key, val in extra_fields.items():
+            fm += f"\n{key}: {val}"
     if relation_entries:
         fm += "\nrelations:"
         for entry in relation_entries:
@@ -768,7 +775,7 @@ def _prompt_single_field(
     body: str,
 ) -> bool:
     """Prompt for one field, patch it in place, write, return False on cancel."""
-    from .helpers import _parse_yaml_field  # type: ignore[attr-defined]
+    from .helpers import _parse_yaml_field, extra_frontmatter_fields  # type: ignore[attr-defined]
     kinds = kinds_root(project)
     world_cfg = load_world_config(project)
     get = lambda f: _parse_yaml_field(fm_lines, f)
@@ -778,10 +785,13 @@ def _prompt_single_field(
     kind_val = get("kind") or kind_id
     summary = get("summary")
     entity_class = get("class")
+    entity_era = get("era")
+    prop_slugs = {p.slug for p in world_cfg.applicable_properties(kind_id)}
     prop_values: dict[str, str] = {
-        p.slug: v for p in world_cfg.applicable_properties(kind_id)
-        if (v := get(p.slug))
+        slug: v for slug in prop_slugs
+        if (v := get(slug))
     }
+    extra_fields = extra_frontmatter_fields(fm_lines, prop_slugs)
     # Preserve existing relation_entries when editing a single field
     relation_entries: list[dict[str, str]] = parse_relation_entries(fm_lines)
 
@@ -806,6 +816,19 @@ def _prompt_single_field(
         if val is None:
             return False
         entity_class = to_content_id(val, cwd=cwd, content=content) if val else ""
+    elif field == "era":
+        # Derive cluster from the md_file path
+        try:
+            cluster = md_file.relative_to(content_root(project)).parts[0]
+        except (ValueError, IndexError):
+            cluster = ""
+        era_refs = world_cfg.era_config.refs_for_cluster(cluster)
+        if era_refs:
+            print(f"  (cluster: {cluster or '(unknown)'}  [{', '.join(era_refs)}])")
+        val = _ask("era (optional)", completer=era_refs if era_refs else None, default=entity_era)  # type: ignore[arg-type]
+        if val is None:
+            return False
+        entity_era = val
     else:
         # world property
         prop_def = next((p for p in world_cfg.applicable_properties(kind_id) if p.slug == field), None)
@@ -821,7 +844,7 @@ def _prompt_single_field(
         else:
             prop_values.pop(field, None)
 
-    _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body)
+    _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body, era=entity_era or "", extra_fields=extra_fields)
     return True
 
 
@@ -829,6 +852,7 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
     from .helpers import (  # type: ignore[attr-defined]
         frontmatter_lines,
         _parse_yaml_field,
+        extra_frontmatter_fields,
         is_collection_folder,
         split_frontmatter,
     )
@@ -991,6 +1015,22 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                 if val:
                     prop_values[prop.slug] = val
 
+            # Era — ask only for era-bounded kinds; show cluster-scoped choices
+            entity_era: str = get("era") or ""
+            if kind_id in era_bounded_kinds(kinds_root(project)):
+                try:
+                    cluster = ent_dir.relative_to(content).parts[0]
+                except (ValueError, IndexError):
+                    cluster = ""
+                era_refs = world_cfg.era_config.refs_for_cluster(cluster)
+                era_default = world_cfg.era_config.default_for_cluster(cluster)
+                if era_refs:
+                    print(f"  (era — cluster: {cluster or '(unknown)'}  [{', '.join(era_refs)}])")
+                era_val = _ask("era (optional)", completer=era_refs if era_refs else None, default=entity_era)  # type: ignore[arg-type]
+                if era_val is None:
+                    return
+                entity_era = era_val
+
             applicable_rels = world_cfg.applicable_relations(kind_id)
             applicable_rel_slugs = [r.slug for r in applicable_rels]
             rel_by_slug = {r.slug: r for r in applicable_rels}
@@ -1030,7 +1070,8 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                             entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
                     relation_entries.append(entry)
 
-            _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body)
+            _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body, era=entity_era,
+                               extra_fields=extra_frontmatter_fields(fm_lines, set(prop_values)))
             print(f"  updated {md_file.relative_to(project)}")
 
         else:
@@ -1064,6 +1105,7 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
     from .helpers import (  # type: ignore[attr-defined]
         frontmatter_lines,
         _parse_yaml_field,
+        extra_frontmatter_fields,
         is_collection_folder,
         split_frontmatter,
     )
@@ -1249,36 +1291,19 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
                 return
             if not val:
                 continue
-            # Write just this one field via _write_entity_file to keep all other fields intact.
-            name_val = get("name") or ent_dir.name
-            summary_val = get("summary")
-            class_val = get("class")
-            prop_values: dict[str, str] = {
-                p.slug: v
-                for p in world_cfg.applicable_properties(kind_id)
-                if (v := get(p.slug))
-            }
-            relation_entries = parse_relation_entries(fm_lines)
-            # Build new frontmatter with era inserted after kind/summary/class
-            fm_new = f"name: {name_val}\nkind: {kind_id}"
-            if class_val:
-                fm_new += f"\nclass: {class_val}"
-            if summary_val:
-                fm_new += f"\nsummary: {summary_val}"
-            fm_new += f"\nera: {val}"
-            for prop_slug, prop_val in prop_values.items():
-                if any(c in prop_val for c in (':', '#', '[', ']', '{', '}', '&', '*', '!', '|', '>', "'", '"')):
-                    fm_new += f'\n{prop_slug}: "{prop_val}"'
-                else:
-                    fm_new += f"\n{prop_slug}: {prop_val}"
-            if relation_entries:
-                fm_new += "\nrelations:"
-                for entry in relation_entries:
-                    fm_new += f"\n  - kind: {entry['kind']}"
-                    fm_new += f"\n    target: {entry['target']}"
-                    if "qualifier" in entry:
-                        fm_new += f"\n    qualifier: {entry['qualifier']}"
-            write_frontmatter_md(md_file, fm_new, body)
+            prop_slugs = {p.slug for p in world_cfg.applicable_properties(kind_id)}
+            _write_entity_file(
+                md_file,
+                get("name") or ent_dir.name,
+                kind_id,
+                get("class") or "",
+                get("summary") or "",
+                {slug: v for slug in prop_slugs if (v := get(slug))},
+                parse_relation_entries(fm_lines),
+                body,
+                era=val,
+                extra_fields=extra_frontmatter_fields(fm_lines, prop_slugs),
+            )
         else:
             ok = _prompt_single_field(project, cwd, content, field, md_file, kind_id, fm_lines, body)
             if not ok:
@@ -1590,6 +1615,24 @@ def _cmd_add(
             if val:
                 prop_values[prop.slug] = val
 
+        # Ask for era if this kind is era-bounded
+        entity_era: str = ""
+        if kind_id in era_bounded_kinds(kinds_root(project)):
+            # Derive cluster from the target path (best guess before entity_dir exists)
+            base_dir_guess = resolve_content_path(path, cwd=cwd, content=content)
+            try:
+                cluster = base_dir_guess.relative_to(content).parts[0]
+            except (ValueError, IndexError):
+                cluster = ""
+            era_refs = world_cfg.era_config.refs_for_cluster(cluster)
+            era_default = world_cfg.era_config.default_for_cluster(cluster)
+            if era_refs:
+                print(f"  (era — cluster: {cluster or '(unknown)'}  [{', '.join(era_refs)}])")
+            era_val = _ask("era (optional)", completer=era_refs if era_refs else None, default=era_default)  # type: ignore[arg-type]
+            if era_val is None:
+                return None
+            entity_era = era_val
+
         # Ask for relations (repeating until the user enters nothing for kind)
         applicable_rels = world_cfg.applicable_relations(kind_id)
         applicable_rel_slugs = [r.slug for r in applicable_rels]
@@ -1652,6 +1695,7 @@ def _cmd_add(
             entity_dir / "index.md",
             name, kind_id, entity_class or "", summary or "",
             prop_values, relation_entries, body="",
+            era=entity_era,
         )
         print(f"  created {(entity_dir / 'index.md').relative_to(project)}")
         return None
@@ -2093,6 +2137,7 @@ def _cmd_check_relations(
     from .helpers import (  # type: ignore[attr-defined]
         frontmatter_lines,
         _parse_yaml_field,
+        extra_frontmatter_fields,
         is_collection_folder,
         split_frontmatter,
     )
@@ -2174,7 +2219,13 @@ def _cmd_check_relations(
             print(f"      missing: {slug}")
 
     # ---------------------------------------------------------------- offer to fill
-    answer = _ask("\n  fill in missing relations now?", completer=["y", "n"], default="n")
+    while True:
+        answer = _ask("\n  fill in missing relations now? [y/n]", completer=["y", "n"])
+        if answer is None:  # cancelled (Ctrl-C / EOF)
+            return
+        if answer.lower() in ("y", "yes", "n", "no"):
+            break
+        print("  please enter y or n")
     if not _confirmed(answer):
         return
 
@@ -2255,14 +2306,11 @@ def _cmd_check_relations(
 
         # Write back only if we added something
         if len(new_entries) > len(existing_entries):
-            # Re-read other fields so we can call _write_entity_file
             summary = get("summary")
             entity_class = get("class")
-            prop_values: dict[str, str] = {
-                p.slug: v
-                for p in world_cfg.applicable_properties(kind_id)
-                if (v := get(p.slug))
-            }
+            entity_era = get("era") or ""
+            prop_slugs = {p.slug for p in world_cfg.applicable_properties(kind_id)}
+            prop_values: dict[str, str] = {slug: v for slug in prop_slugs if (v := get(slug))}
             _write_entity_file(
                 md_file,
                 get("name") or ent_dir.name,
@@ -2272,6 +2320,8 @@ def _cmd_check_relations(
                 prop_values,
                 new_entries,
                 body,
+                era=entity_era,
+                extra_fields=extra_frontmatter_fields(fm_lines, prop_slugs),
             )
             print(f"  updated {md_file.relative_to(project)}")
         else:
