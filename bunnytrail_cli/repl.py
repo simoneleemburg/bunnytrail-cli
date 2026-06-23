@@ -352,6 +352,11 @@ class _KindSuggestedPathCompleter(Completer):
 
     Once the user starts typing, falls back to normal cwd-relative /
     content-root path completion (same behaviour as _CwdPathCompleter).
+
+    *exclude* is an optional set of content-relative entity ids (e.g.
+    ``{"aurethia/places/bayurinda"}``).  Any completion whose normalised
+    path matches an excluded id is omitted, so already-chosen relation
+    targets are hidden from the menu.
     """
 
     def __init__(
@@ -360,11 +365,28 @@ class _KindSuggestedPathCompleter(Completer):
         cwd: Path,
         kind_ids: "list[str]",
         recent_collections: "Sequence[str]" = (),
+        exclude: "frozenset[str] | set[str]" = frozenset(),
     ) -> None:
         self._content = content
         self._cwd = cwd
         self._kind_ids = kind_ids
         self._recent_collections = list(recent_collections)
+        self._exclude = set(exclude)
+
+    def _is_excluded(self, replacement: str) -> bool:
+        """Return True if *replacement* (a completion string) maps to an excluded id."""
+        # Completions end with '/'; strip it to get a content-relative id candidate.
+        # We check both cwd-relative and content-root-relative forms.
+        stripped = replacement.rstrip("/")
+        if not stripped:
+            return False
+        # Resolve to a content-relative id
+        abs_path = resolve_content_path(stripped, cwd=self._cwd, content=self._content)
+        try:
+            rel_id = str(abs_path.relative_to(self._content))
+        except ValueError:
+            rel_id = stripped
+        return rel_id in self._exclude
 
     def get_completions(
         self, document: Document, complete_event
@@ -383,6 +405,8 @@ class _KindSuggestedPathCompleter(Completer):
                     if rel in seen:
                         continue
                     seen.add(rel)
+                    # In suggestion mode the completions are parent dirs, not
+                    # individual entities, so we can't exclude at folder level.
                     yield Completion(rel + "/", start_position=0, display=rel + "/")
 
             # 2. Recently-added collections (content-relative paths)
@@ -397,17 +421,22 @@ class _KindSuggestedPathCompleter(Completer):
                 )
             return
 
-        # ── Typing mode: normal path completion ──────────────────────────
+        # ── Typing mode: normal path completion, excluding used targets ──
         if text.startswith("/"):
             fragment = text[1:]
             for replacement, display in _path_completions(fragment, self._content):
+                full = "/" + replacement
+                if self._exclude and self._is_excluded(full):
+                    continue
                 yield Completion(
-                    "/" + replacement,
+                    full,
                     start_position=-len(text),
                     display=display,
                 )
         else:
             for replacement, display in _path_completions(text, self._cwd):
+                if self._exclude and self._is_excluded(replacement):
+                    continue
                 yield Completion(
                     replacement,
                     start_position=-len(text),
@@ -976,8 +1005,9 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                         break
                     rel_def = rel_by_slug.get(rel_kind)
                     codomain = rel_def.codomain if rel_def else []
+                    used_targets = {e["target"] for e in relation_entries if e["kind"] == rel_kind}
                     if codomain:
-                        tc = _KindSuggestedPathCompleter(content, cwd, codomain)
+                        tc = _KindSuggestedPathCompleter(content, cwd, codomain, exclude=used_targets)
                         rel_target = _ask("  target", completer=tc)
                     else:
                         rel_target = _ask("  target", complete_from_cwd=(cwd, content))
@@ -1509,9 +1539,10 @@ def _cmd_add(
                 # Narrow target suggestions by the relation's codomain (if any)
                 rel_def = rel_by_slug.get(rel_kind)
                 codomain = rel_def.codomain if rel_def else []
+                used_targets = {e["target"] for e in relation_entries if e["kind"] == rel_kind}
                 if codomain:
                     target_completer = _KindSuggestedPathCompleter(
-                        content, cwd, codomain
+                        content, cwd, codomain, exclude=used_targets
                     )
                     print(
                         f"  (Tab to see targets for '{rel_kind}'"
@@ -2118,8 +2149,9 @@ def _cmd_check_relations(
 
             # How many instances to add (loop until the user leaves target blank)
             while True:
+                used_targets = {e["target"] for e in new_entries if e["kind"] == rel_slug}
                 if codomain:
-                    tc = _KindSuggestedPathCompleter(content, cwd, codomain)
+                    tc = _KindSuggestedPathCompleter(content, cwd, codomain, exclude=used_targets)
                     print(
                         f"  (Tab to see targets for '{rel_slug}'"
                         f"; kinds: {', '.join(codomain)})"
