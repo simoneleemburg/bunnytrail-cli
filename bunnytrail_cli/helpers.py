@@ -1028,6 +1028,33 @@ class PropertyDef:
 
 
 @dataclass
+class EraClusterConfig:
+    """Era configuration for one cluster (top-level content namespace)."""
+    default: str                  # ref of the default era for this cluster
+    eras: list[str]               # ordered list of era refs valid in this cluster
+
+
+@dataclass
+class EraConfig:
+    """Era configuration loaded from the ``eras:`` block in ``world.md``."""
+    definitions: list[dict[str, str]]        # [{ref, title, description?}, ...]
+    per_cluster: dict[str, EraClusterConfig] # cluster slug → config
+
+    def refs_for_cluster(self, cluster: str) -> list[str]:
+        """Return the ordered era refs valid for *cluster*, or all defined
+        refs if the cluster has no explicit configuration."""
+        if cluster in self.per_cluster:
+            return list(self.per_cluster[cluster].eras)
+        return [d["ref"] for d in self.definitions]
+
+    def default_for_cluster(self, cluster: str) -> str:
+        """Return the default era ref for *cluster*, or empty string."""
+        if cluster in self.per_cluster:
+            return self.per_cluster[cluster].default
+        return ""
+
+
+@dataclass
 class WorldConfig:
     """Relations and properties loaded from the new ontology schema.
 
@@ -1042,6 +1069,7 @@ class WorldConfig:
     properties: list[PropertyDef] = field(default_factory=list)
     allow_undefined_relations: bool = False
     allow_undefined_properties: bool = False
+    era_config: EraConfig = field(default_factory=lambda: EraConfig(definitions=[], per_cluster={}))
 
     def applicable_relations(self, kind_id: str) -> list[RelationDef]:
         """Relations whose ``domain`` includes *kind_id* or is unrestricted."""
@@ -1285,6 +1313,7 @@ def load_world_config(project: Path) -> WorldConfig:
     allow_undef_props = False
     relations: list[RelationDef] = []
     properties: list[PropertyDef] = []
+    era_cfg = EraConfig(definitions=[], per_cluster={})
 
     # ── relations from _ontology.yaml files ────────────────────────────────
     if kinds.is_dir():
@@ -1313,6 +1342,32 @@ def load_world_config(project: Path) -> WorldConfig:
         if isinstance(data, dict):
             allow_undef_rels = bool(data.get("allowUndefinedRelations", False))
             allow_undef_props = bool(data.get("allowUndefinedProperties", False))
+
+            # ── eras block ────────────────────────────────────────────────
+            raw_eras = data.get("eras") or {}
+            if isinstance(raw_eras, dict):
+                # definitions: list of {ref, title, description?}
+                era_defs: list[dict[str, str]] = []
+                for defn in (raw_eras.get("definitions") or []):
+                    if isinstance(defn, dict) and defn.get("ref"):
+                        entry: dict[str, str] = {"ref": str(defn["ref"]), "title": str(defn.get("title") or defn["ref"])}
+                        if defn.get("description"):
+                            entry["description"] = str(defn["description"])
+                        era_defs.append(entry)
+
+                # perCluster: {cluster: {default, eras: [refs]}}
+                per_cluster: dict[str, EraClusterConfig] = {}
+                raw_pc = raw_eras.get("perCluster") or {}
+                if isinstance(raw_pc, dict):
+                    for cluster, cfg in raw_pc.items():
+                        if not isinstance(cfg, dict):
+                            continue
+                        per_cluster[str(cluster)] = EraClusterConfig(
+                            default=str(cfg.get("default") or ""),
+                            eras=_as_str_list(cfg.get("eras")),
+                        )
+
+                era_cfg = EraConfig(definitions=era_defs, per_cluster=per_cluster)
 
             # Backward compatibility: relations block in world.md
             raw_rels = data.get("relations") or {}
@@ -1346,6 +1401,7 @@ def load_world_config(project: Path) -> WorldConfig:
         properties=properties,
         allow_undefined_relations=allow_undef_rels,
         allow_undefined_properties=allow_undef_props,
+        era_config=era_cfg,
     )
 
 
@@ -2898,6 +2954,33 @@ def expand_kind_slugs(kinds_root_path: Path, slugs: list[str]) -> set[str]:
                 queue.append(child)
 
     return result
+
+
+def era_bounded_kinds(kinds_root_path: Path) -> set[str]:
+    """Return the set of all kind slugs that are era-bounded.
+
+    A kind is era-bounded if its own ``_kind.yaml`` declares
+    ``eraBounded: true``, **or** if any ancestor kind in the hierarchy
+    does (the flag is inherited by all subkinds).
+
+    Uses :func:`expand_kind_slugs` to perform the transitive expansion so
+    the same filesystem-walk logic is reused.
+    """
+    if not kinds_root_path.is_dir():
+        return set()
+
+    # Collect the directly-declared era-bounded kind slugs
+    direct: list[str] = []
+    for kind_yaml in kinds_root_path.rglob("_kind.yaml"):
+        try:
+            data = yaml.safe_load(kind_yaml.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(data, dict) and data.get("eraBounded"):
+            direct.append(kind_yaml.parent.name)
+
+    # Expand to include all subkinds
+    return expand_kind_slugs(kinds_root_path, direct)
 
 
 def _collection_title_ref(
