@@ -1069,6 +1069,9 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                         if rel_qualifier:
                             entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
                     relation_entries.append(entry)
+                    more = _ask("  add another relation?", completer=["y", "n"], default="n")
+                    if not _confirmed(more):
+                        break
 
             _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body, era=entity_era,
                                extra_fields=extra_frontmatter_fields(fm_lines, set(prop_values)))
@@ -1639,7 +1642,7 @@ def _cmd_add(
         rel_by_slug = {r.slug: r for r in applicable_rels}
         relation_entries: "list[dict[str, str]]" = []
         if applicable_rel_slugs:
-            print("  relations — enter a relation kind and target (empty kind to finish):")
+            print("  relations — enter a relation kind and target:")
             while True:
                 rel_kind = _ask("  kind", completer=applicable_rel_slugs)  # type: ignore[arg-type]
                 if not rel_kind:
@@ -1679,6 +1682,9 @@ def _cmd_add(
                         entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
 
                 relation_entries.append(entry)
+                more = _ask("  add another relation?", completer=["y", "n"], default="n")
+                if not _confirmed(more):
+                    break
 
         base_dir = resolve_content_path(path, cwd=cwd, content=content)
         entity_dir = base_dir / slug.rstrip("/")
