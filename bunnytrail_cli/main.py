@@ -447,6 +447,8 @@ def rename(ctx: click.Context, old_path: str, new_slug: str, dry_run: bool, yes:
                 default=old_description,
                 show_default=False,
             )
+            if nd:
+                nd = " ".join(nd.splitlines()).strip()
             if nd and nd != old_description:
                 new_display["description"] = nd
 

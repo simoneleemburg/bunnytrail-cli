@@ -1643,7 +1643,10 @@ def _is_in_span(pos: int, length: int, spans: list[tuple[int, int]]) -> bool:
 # phrase, not three.  Restricted to whole-token matches; a PNP must
 # still START and END with a Capitalized word.
 _PNP_CONNECTORS = frozenset({
-    "of", "the", "and",                # English
+    "of", "the",                       # English preposition / article
+    # NOTE: "and" is intentionally excluded — it is a coordinating
+    # conjunction that joins separate proper nouns ("Buunh and Skarn-Mar")
+    # rather than forming part of a single compound name.
     "de", "da", "du",                  # Romance particles
     "von", "van",                      # Germanic
     "le", "la",                        # French articles
@@ -1698,7 +1701,13 @@ def _proper_noun_phrase_spans(line: str) -> list[tuple[int, int, str]]:
     i = 0
     n = len(tokens)
     while i < n:
-        if not _is_capitalized(tokens[i][2]):
+        tok = tokens[i][2]
+        if not _is_capitalized(tok) or tok.lower() in _PNP_CONNECTORS:
+            # A PNP must START on a capitalised word that is not itself a
+            # connector.  Connector words like "The", "Of", "De" are
+            # legitimately capitalised at the start of a sentence but they
+            # don't anchor a proper noun phrase — e.g. "The Montari" should
+            # yield the PNP "Montari", not "The Montari".
             i += 1
             continue
         # Try to extend the run.  Track the last index that was

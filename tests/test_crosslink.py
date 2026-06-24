@@ -357,6 +357,35 @@ def test_pnp_does_not_block_lowercase_followup(project: Path) -> None:
     assert "[[sharazan|Sharazan]]" in body
 
 
+def test_pnp_sentence_initial_the_does_not_block_entity(project: Path) -> None:
+    # 'The Sharazan' — sentence-initial 'The' is a connector word and must
+    # not anchor a PNP.  The PNP is 'Sharazan' alone, so the entity IS linked.
+    _set_body(project, "aurethia/people/duskmere",
+              "The Sharazan lay beyond the mountains.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan|Sharazan]]" in body
+
+
+def test_pnp_and_connector_does_not_merge_separate_entities(project: Path) -> None:
+    # 'Sharazan and Maerath' — 'and' is a coordinating conjunction, not a
+    # PNP connector.  Both entities must be linked independently.
+    maerath = project / "content" / "aurethia" / "places" / "maerath"
+    maerath.mkdir(parents=True)
+    (maerath / "index.md").write_text(
+        "---\nname: Maerath\nkind: place\n---\nA place.\n",
+        encoding="utf-8",
+    )
+    _set_body(project, "aurethia/people/duskmere",
+              "Travellers cross Sharazan and Maerath in summer.\n")
+    plan = plan_crosslink(project, "aurethia/people/duskmere", "aurethia/places")
+    execute_crosslink(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    assert "[[sharazan|Sharazan]]" in body
+    assert "[[maerath|Maerath]]" in body
+
+
 def test_pnp_punctuation_breaks_the_phrase(project: Path) -> None:
     # 'Sharazan, Tower of Light' — the comma after Sharazan ends the
     # PNP run, so 'Sharazan' is its own 1-word PNP and gets linked.

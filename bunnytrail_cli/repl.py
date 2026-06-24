@@ -1764,6 +1764,8 @@ def _cmd_add(
                 return None
 
         description = _ask("description (optional)")  # empty → omitted
+        if description:
+            description = " ".join(description.splitlines()).strip()
 
         base_dir = resolve_content_path(path, cwd=cwd, content=content)
         coll_dir = base_dir / slug.rstrip("/")
@@ -1811,6 +1813,9 @@ def _cmd_add(
                 plural = auto_plural(singular)
 
         description = _ask("description (optional)")
+        if description:
+            # Collapse any embedded newlines / control chars from paste
+            description = " ".join(description.splitlines()).strip()
 
         path = path.rstrip("/")
         if path in ("", "."):
@@ -1847,6 +1852,8 @@ def _cmd_add(
                 return None
 
         description = _ask("description (optional)")
+        if description:
+            description = " ".join(description.splitlines()).strip()
 
         ontology_dir = kinds / path
         yaml_file = ontology_dir / "_ontology.yaml"
@@ -2023,6 +2030,8 @@ def _cmd_rename(project: Path, cwd: Path, content: Path, args: list[str]) -> Non
                 if answer and answer != old_plural:
                     new_display["plural"] = answer
             answer = _ask("description (optional)", default=old_description)
+            if answer is not None:
+                answer = " ".join(answer.splitlines()).strip()
             if answer is not None and answer != old_description:
                 new_display["description"] = answer
 
