@@ -674,7 +674,7 @@ def _cmd_ls(cwd: Path, content: Path) -> None:
 
 
 def _cmd_info(cwd: Path, content: Path) -> None:
-    from .helpers import frontmatter_lines, _parse_yaml_field, is_collection_folder  # type: ignore[attr-defined]
+    from .helpers import frontmatter_lines, _parse_yaml_field, is_collection_folder, entity_display_title  # type: ignore[attr-defined]
 
     output: list[str] = []
 
@@ -694,7 +694,10 @@ def _cmd_info(cwd: Path, content: Path) -> None:
                 except OSError:
                     continue
                 fm = frontmatter_lines(text)
-                name = _parse_yaml_field(fm, "name") or child.name
+                raw_name = _parse_yaml_field(fm, "name") or child.name
+                entity_type = _parse_yaml_field(fm, "type") or "instance"
+                plural = _parse_yaml_field(fm, "plural") or ""
+                name = entity_display_title(raw_name, entity_type, plural)
                 summary = _parse_yaml_field(fm, "summary")
                 entries.append((name, summary))
             elif is_collection_folder(child):
@@ -745,9 +748,15 @@ def _write_entity_file(
     body: str,
     era: str = "",
     extra_fields: "dict[str, str] | None" = None,
+    entity_type: str = "",
+    plural: str = "",
 ) -> None:
     """Serialise entity frontmatter fields and write *md_file*."""
     fm = f"name: {name}\nkind: {kind_id}"
+    if entity_type and entity_type != "instance":
+        fm += f"\ntype: {entity_type}"
+    if plural:
+        fm += f"\nplural: {plural}"
     if entity_class:
         fm += f"\nclass: {entity_class.strip('/')}"
     if summary:
@@ -800,6 +809,8 @@ def _prompt_single_field(
     summary = get("summary")
     entity_class = get("class")
     entity_era = get("era")
+    entity_type = get("type") or ""
+    plural = get("plural") or ""
     prop_slugs = {p.slug for p in world_cfg.applicable_properties(kind_id)}
     prop_values: dict[str, str] = {
         slug: v for slug in prop_slugs
@@ -867,7 +878,8 @@ def _prompt_single_field(
             return False
         prop_values[field] = val
 
-    _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body, era=entity_era or "", extra_fields=extra_fields)
+    _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body, era=entity_era or "", extra_fields=extra_fields,
+                       entity_type=entity_type, plural=plural)
     return True
 
 
@@ -1097,7 +1109,9 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                         break
 
             _write_entity_file(md_file, name, kind_id, entity_class, summary, prop_values, relation_entries, body, era=entity_era,
-                               extra_fields=extra_frontmatter_fields(fm_lines, set(prop_values)))
+                               extra_fields=extra_frontmatter_fields(fm_lines, set(prop_values)),
+                               entity_type=get("type") or "",
+                               plural=get("plural") or "")
             print(f"  updated {md_file.relative_to(project)}")
 
         else:
@@ -1108,7 +1122,7 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
             print(f"  updated {md_file.relative_to(project)}")
 
 
-_ENTITY_BUILTINS = ["name", "kind", "summary", "class", "era"]
+_ENTITY_BUILTINS = ["name", "kind", "type", "plural", "summary", "class", "era"]
 _KIND_FIELDS = ["singular", "plural", "description"]
 
 
@@ -1134,15 +1148,28 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
         extra_frontmatter_fields,
         is_collection_folder,
         split_frontmatter,
+        check_entity_type_violations,
     )
 
     world_cfg = load_world_config(project)
     kinds = kinds_root(project)
 
     # --------------------------------------------------------- ask what to check
-    field_choices = _build_field_choices(world_cfg)
+    field_choices = ["type-violations"] + _build_field_choices(world_cfg)
     field = _ask("check what?", completer=field_choices)  # type: ignore[arg-type]
     if not field:
+        return
+
+    # --------------------------------------------------------- type-violations
+    if field == "type-violations":
+        violations = check_entity_type_violations(project)
+        if not violations:
+            print("  no type/plural violations found")
+            return
+        print(f"\n  {len(violations)} violation(s):")
+        for v in violations:
+            print(f"  - {v.name}  ({v.entity_id})")
+            print(f"      {v.violation}")
         return
 
     is_kind_field = field in _KIND_FIELDS
@@ -1341,6 +1368,8 @@ def _cmd_check(project: Path, cwd: Path, content: Path, args: list[str]) -> None
                 body,
                 era=val,
                 extra_fields=extra_frontmatter_fields(fm_lines, prop_slugs),
+                entity_type=get("type") or "",
+                plural=get("plural") or "",
             )
         else:
             ok = _prompt_single_field(project, cwd, content, field, md_file, kind_id, fm_lines, body)
@@ -2374,6 +2403,8 @@ def _cmd_check_relations(
                 body,
                 era=entity_era,
                 extra_fields=extra_frontmatter_fields(fm_lines, prop_slugs),
+                entity_type=get("type") or "",
+                plural=get("plural") or "",
             )
             print(f"  updated {md_file.relative_to(project)}")
         else:

@@ -171,6 +171,8 @@ def add() -> None:
 @click.argument("name")
 @click.argument("kind")
 @click.option("--summary", default="", help="One-line summary.")
+@click.option("--type", "entity_type", default="", help="Entity type: 'class' or 'instance' (default: instance).")
+@click.option("--plural", default="", help="Plural form (only valid with --type class).")
 @click.option("--force", is_flag=True, help="Overwrite existing files.")
 @click.pass_context
 def add_entity(
@@ -179,6 +181,8 @@ def add_entity(
     name: str,
     kind: str,
     summary: str,
+    entity_type: str,
+    plural: str,
     force: bool,
 ) -> None:
     """Create a new entity stub at content/PATH.
@@ -209,9 +213,19 @@ def add_entity(
             err=True,
         )
 
+    if plural and entity_type != "class":
+        click.echo(
+            "Warning: --plural is only meaningful for --type class entities.",
+            err=True,
+        )
+
     entity_dir.mkdir(parents=True, exist_ok=True)
 
     fm_lines = [f"name: {name}", f"kind: {kind_id}"]
+    if entity_type and entity_type != "instance":
+        fm_lines.append(f"type: {entity_type}")
+    if plural:
+        fm_lines.append(f"plural: {plural}")
     if summary:
         fm_lines.append(f"summary: {summary}")
     write_frontmatter_md(md_file, "\n".join(fm_lines))

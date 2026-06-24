@@ -982,6 +982,60 @@ def load_crosslink_config(project: Path) -> CrosslinkConfig:
 
 
 # ---------------------------------------------------------------------------
+# Entity type/plural validation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EntityTypeViolation:
+    """One healthcheck finding for ``type``/``plural`` misuse.
+
+    ``entity_id`` is the content-relative path (e.g. ``aurethia/places/sharazan``).
+    ``name`` is the ``name:`` field value (or the folder slug if missing).
+    ``violation`` is a short human-readable description of the problem.
+    """
+    entity_id: str
+    name: str
+    violation: str
+
+
+def check_entity_type_violations(project: Path) -> list[EntityTypeViolation]:
+    """Scan all entities and return ``type``/``plural`` policy violations.
+
+    Rules checked:
+
+    * ``type: class`` entity that also has a ``class:`` field → wrong;
+      the ``class:`` field is for instances pointing at their class, not
+      for class entities themselves.
+    * ``type: instance`` (default) entity that has a ``plural:`` field →
+      ``plural:`` is only meaningful on class entities.
+    """
+    content = content_root(project).resolve()
+    violations: list[EntityTypeViolation] = []
+    for md_file in sorted(iter_entity_md_files(content)):
+        text = md_file.read_text(encoding="utf-8")
+        fm = frontmatter_lines(text)
+        entity_id = str(md_file.parent.relative_to(content))
+        name = _parse_yaml_field(fm, "name") or md_file.parent.name
+        entity_type = _parse_yaml_field(fm, "type") or "instance"
+        entity_class = _parse_yaml_field(fm, "class")
+        plural = _parse_yaml_field(fm, "plural")
+
+        if entity_type == "class" and entity_class:
+            violations.append(EntityTypeViolation(
+                entity_id=entity_id,
+                name=name,
+                violation="type: class entity has a 'class:' field (only instances may reference a class)",
+            ))
+        if entity_type != "class" and plural:
+            violations.append(EntityTypeViolation(
+                entity_id=entity_id,
+                name=name,
+                violation=f"type: {entity_type!r} entity has a 'plural:' field (only class entities accept plural)",
+            ))
+    return violations
+
+
+# ---------------------------------------------------------------------------
 # world.md — world-level schema (relations and properties)
 # ---------------------------------------------------------------------------
 
@@ -1500,7 +1554,7 @@ def _parse_yaml_field(lines: list[str], field: str) -> str:
 # Keys that _write_entity_file handles via dedicated parameters; anything else
 # is "extra" and should be preserved verbatim.
 _ENTITY_HANDLED_KEYS: frozenset[str] = frozenset(
-    ["name", "kind", "class", "summary", "era", "relations"]
+    ["name", "kind", "type", "plural", "class", "summary", "era", "relations"]
 )
 
 # Keys that belong to _kind.yaml files, not entity index.md files
@@ -1567,6 +1621,9 @@ def collect_namespace_entities(project: Path, namespace_path: str) -> list[tuple
 
     *namespace_path* is relative to ``content/``.
     Entities with an empty or missing ``name:`` field are skipped.
+    Entities with ``type: class`` are excluded — class entities may only be
+    linked explicitly by the author; the crosslink command only inserts links
+    to ``type: instance`` entities.
     """
     content = content_root(project).resolve()
     ns_dir = content / namespace_path
@@ -1580,6 +1637,9 @@ def collect_namespace_entities(project: Path, namespace_path: str) -> list[tuple
         fm_lines = frontmatter_lines(text)
         name = _parse_yaml_field(fm_lines, "name")
         if not name:
+            continue
+        entity_type = _parse_yaml_field(fm_lines, "type") or "instance"
+        if entity_type == "class":
             continue
         entity_id = str(entity_dir.relative_to(content))
         results.append((name, entity_id))
@@ -2397,6 +2457,31 @@ def read_entity_display_name(entity_dir: Path) -> str:
     if not md.is_file():
         return ""
     return _parse_yaml_field(frontmatter_lines(md.read_text(encoding="utf-8")), "name")
+
+
+def read_entity_type(entity_dir: Path) -> str:
+    """Return the ``type:`` field of an entity's ``index.md``.
+
+    Returns ``"instance"`` when the field is absent (default), ``"class"``
+    when explicitly set, or the raw value for anything else.
+    """
+    md = entity_dir / "index.md"
+    if not md.is_file():
+        return "instance"
+    val = _parse_yaml_field(frontmatter_lines(md.read_text(encoding="utf-8")), "type")
+    return val if val else "instance"
+
+
+def entity_display_title(name: str, entity_type: str, plural: str) -> str:
+    """Return the display title for an entity as shown in the CLI.
+
+    * ``type: class`` with a ``plural:`` value  → ``"name / plural"``
+    * ``type: class`` without ``plural:``        → ``"name (class)"``
+    * ``type: instance`` (default)               → ``"name"``
+    """
+    if entity_type == "class":
+        return f"{name} / {plural}" if plural else f"{name} (class)"
+    return name
 
 
 def read_kind_display_names(kind_dir: Path) -> tuple[str, str, str]:
