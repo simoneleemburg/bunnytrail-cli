@@ -13,16 +13,10 @@ if __name__ == "__main__":
     # First try the sibling alteria_world folder (works when both repos are
     # checked out side-by-side, e.g. on Pythonista/iOS).
     sibling = _here.parent / "alteria_world"
-    print("sibling path:", sibling)
-    print("sibling exists:", sibling.is_dir())
-    print("has content:", (sibling / "content").is_dir())
-    print("has STRUCTURE.md:", (sibling / "STRUCTURE.md").is_file())
     if sibling.is_dir():
         try:
             project = find_project_root(start=sibling)
-            print("project found:", project)
-        except FileNotFoundError as e:
-            print("find_project_root failed:", e)
+        except FileNotFoundError:
             project = None
     else:
         project = None

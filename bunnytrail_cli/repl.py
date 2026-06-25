@@ -2454,13 +2454,25 @@ def run_shell(project: Path) -> None:
 
     shell_completer = _ShellCompleter(project)
     history = FileHistory(str(HISTORY_FILE))
-    session: PromptSession = PromptSession(
-        completer=shell_completer,
-        complete_style=CompleteStyle.MULTI_COLUMN,
-        complete_while_typing=False,
-        history=history,
-        key_bindings=_make_tab_bindings(),
-    )
+    # prompt_toolkit requires a real TTY; fall back to plain readline on
+    # environments like Pythonista where sys.stdin has no fileno().
+    _use_prompt_toolkit = True
+    try:
+        import sys as _sys
+        _sys.stdin.fileno()
+    except Exception:
+        _use_prompt_toolkit = False
+
+    if _use_prompt_toolkit:
+        session: PromptSession = PromptSession(
+            completer=shell_completer,
+            complete_style=CompleteStyle.MULTI_COLUMN,
+            complete_while_typing=False,
+            history=history,
+            key_bindings=_make_tab_bindings(),
+        )
+    else:
+        session = None  # type: ignore
 
     print("bunnytrail shell.  Type 'help' for commands, 'exit' to quit.")
     print(f"Root: {project}\n")
@@ -2478,7 +2490,20 @@ def run_shell(project: Path) -> None:
             prompt_text = f"{_GREEN}bt{_RESET}{_YELLOW} > {_RESET}"
 
         try:
-            raw = session.prompt(ANSI(prompt_text))
+            if session is not None:
+                raw = session.prompt(ANSI(prompt_text))
+            else:
+                import sys as _sys
+                # Strip ANSI codes for plain output
+                import re as _re
+                plain_prompt = _re.sub(r"\x1b\[[0-9;]*m", "", prompt_text)
+                _sys.stdout.write(plain_prompt)
+                _sys.stdout.flush()
+                raw = _sys.stdin.readline()
+                if raw == "":
+                    print("\nBye.")
+                    break
+                raw = raw.rstrip("\n")
         except (EOFError, KeyboardInterrupt):
             print("\nBye.")
             break
