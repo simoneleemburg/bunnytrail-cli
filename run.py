@@ -2,11 +2,15 @@ import sys
 import os
 from pathlib import Path
 
-print(sys.version)
-
 _here = Path(os.path.abspath(__file__)).parent
 sys.path.insert(0, str(_here))
 sys.path.insert(0, str(_here / "vendor"))
+
+# Evict any pre-loaded copies of vendored packages so the versions in
+# vendor/ are imported instead of Pythonista's potentially outdated ones.
+for _mod in list(sys.modules):
+    if _mod == "yaml" or _mod.startswith("yaml."):
+        del sys.modules[_mod]
 
 from bunnytrail_cli.helpers import find_project_root
 from bunnytrail_cli.repl import run_shell
