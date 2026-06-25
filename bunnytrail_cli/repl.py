@@ -83,6 +83,7 @@ TOP_LEVEL_COMMANDS = [
     "add",
     "edit",
     "check",
+    "check-rel",
     "check-relations",
     "strip",
     "move",
@@ -554,10 +555,9 @@ class _ShellCompleter(Completer):
             if len(tokens) in (2, 3):
                 yield from _yield_paths(fragment, self.cwd, frag_start)
 
-        elif cmd == "check-relations":
+        elif cmd in ("check-rel", "check-relations"):
             if len(tokens) == 2:
                 yield from _yield_paths(fragment, self.cwd, frag_start)
-
 
 def _yield_words(
     words: Iterable[str], fragment: str, start_position: int
@@ -783,11 +783,13 @@ def _write_entity_file(
         fm += f"\nsummary: {summary}"
     if era:
         fm += f"\nera: {era}"
-    for prop_slug, prop_val in prop_values.items():
-        if any(c in prop_val for c in (':', '#', '[', ']', '{', '}', '&', '*', '!', '|', '>', "'", '"')):
-            fm += f'\n{prop_slug}: "{prop_val}"'
-        else:
-            fm += f"\n{prop_slug}: {prop_val}"
+    if prop_values:
+        fm += "\nproperties:"
+        for prop_slug, prop_val in prop_values.items():
+            if any(c in prop_val for c in (':', '#', '[', ']', '{', '}', '&', '*', '!', '|', '>', "'", '"')):
+                fm += f'\n  {prop_slug}: "{prop_val}"'
+            else:
+                fm += f"\n  {prop_slug}: {prop_val}"
     if extra_fields:
         for key, val in extra_fields.items():
             fm += f"\n{key}: {val}"
@@ -1606,6 +1608,80 @@ def _slug_to_title(slug: str) -> str:  # kept as shim; prefer slug_to_title from
     return slug_to_title(slug)
 
 
+def _prompt_relations(
+    project: Path,
+    cwd: Path,
+    content: Path,
+    kind_id: str,
+    existing_entries: "list[dict[str, str]]",
+) -> "list[dict[str, str]]":
+    """Interactively prompt for relations for a given kind.
+
+    Iterates over all applicable relation kinds, prompting for targets
+    one-by-one (mirroring the check-rel fill-in flow).  Returns the
+    full list of entries (existing + newly added).
+
+    Returns the original *existing_entries* unchanged if the user skips
+    everything or there are no applicable relations.
+    """
+    world_cfg = load_world_config(project)
+    applicable_rels = world_cfg.applicable_relations(kind_id)
+    if not applicable_rels:
+        return list(existing_entries)
+
+    rel_by_slug = {r.slug: r for r in applicable_rels}
+    new_entries: "list[dict[str, str]]" = list(existing_entries)
+
+    for rel_def in applicable_rels:
+        rel_slug = rel_def.slug
+        codomain = rel_def.codomain
+        qualifier_required = rel_def.qualifier_required
+        qualifier_domain = rel_def.qualifier_domain
+
+        print(f"  relation: {rel_slug}")
+
+        while True:
+            used_targets = {e["target"] for e in new_entries if e["kind"] == rel_slug}
+            if codomain:
+                tc = _KindSuggestedPathCompleter(content, cwd, codomain, exclude=used_targets)
+                print(
+                    f"  (Tab to see targets for '{rel_slug}'"
+                    f"; kinds: {', '.join(codomain)})"
+                )
+                rel_target = _ask("  target (empty to skip)", completer=tc)
+            else:
+                rel_target = _ask("  target (empty to skip)", complete_from_cwd=(cwd, content))
+
+            if not rel_target:
+                break
+
+            entry: "dict[str, str]" = {
+                "kind": rel_slug,
+                "target": to_content_id(rel_target, cwd=cwd, content=content),
+            }
+
+            if qualifier_required:
+                if qualifier_domain:
+                    q_completer = _KindSuggestedPathCompleter(content, cwd, qualifier_domain)
+                    print(
+                        f"  (qualifier required; Tab to see candidates"
+                        f"; kinds: {', '.join(qualifier_domain)})"
+                    )
+                    rel_qualifier = _ask("  qualifier", completer=q_completer)
+                else:
+                    rel_qualifier = _ask("  qualifier", complete_from_cwd=(cwd, content))
+                if rel_qualifier:
+                    entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
+
+            new_entries.append(entry)
+
+            more = _ask(f"  add another '{rel_slug}'?", completer=["y", "n"], default="n")
+            if not _confirmed(more):
+                break
+
+    return new_entries
+
+
 def _cmd_add(
     project: Path,
     cwd: Path,
@@ -1625,11 +1701,13 @@ def _cmd_add(
         recent_collections = []
 
     if not args:
-        sub = _ask("add what?", completer=ADD_SUBCOMMANDS)  # type: ignore[arg-type]
+        sub = _ask("add what? [e/k/c]", completer=ADD_SUBCOMMANDS)  # type: ignore[arg-type]
         if not sub:
             return None
     else:
         sub = args[0]
+
+    sub = {"e": "entity", "k": "kind", "c": "collection"}.get(sub, sub)
 
     if sub not in ADD_SUBCOMMANDS:
         print(f"  unknown add subcommand: {sub!r}")
@@ -1722,55 +1800,8 @@ def _cmd_add(
                 return None
             entity_era = era_val
 
-        # Ask for relations (repeating until the user enters nothing for kind)
-        applicable_rels = world_cfg.applicable_relations(kind_id)
-        applicable_rel_slugs = [r.slug for r in applicable_rels]
-        rel_by_slug = {r.slug: r for r in applicable_rels}
-        relation_entries: "list[dict[str, str]]" = []
-        if applicable_rel_slugs:
-            print("  relations — enter a relation kind and target:")
-            while True:
-                rel_kind = _ask("  kind", completer=applicable_rel_slugs)  # type: ignore[arg-type]
-                if not rel_kind:
-                    break
-                # Narrow target suggestions by the relation's codomain (if any)
-                rel_def = rel_by_slug.get(rel_kind)
-                codomain = rel_def.codomain if rel_def else []
-                used_targets = {e["target"] for e in relation_entries if e["kind"] == rel_kind}
-                if codomain:
-                    target_completer = _KindSuggestedPathCompleter(
-                        content, cwd, codomain, exclude=used_targets
-                    )
-                    print(
-                        f"  (Tab to see targets for '{rel_kind}'"
-                        f"; kinds: {', '.join(codomain)})"
-                    )
-                    rel_target = _ask("  target", completer=target_completer)
-                else:
-                    rel_target = _ask("  target", complete_from_cwd=(cwd, content))
-                if not rel_target:
-                    break
-                entry: "dict[str, str]" = {"kind": rel_kind, "target": to_content_id(rel_target, cwd=cwd, content=content)}
-
-                # Prompt for qualifier only when the relation requires one
-                if rel_def and rel_def.qualifier_required:
-                    q_domain = rel_def.qualifier_domain
-                    if q_domain:
-                        q_completer = _KindSuggestedPathCompleter(content, cwd, q_domain)
-                        print(
-                            f"  (qualifier required; Tab to see candidates"
-                            f"; kinds: {', '.join(q_domain)})"
-                        )
-                        rel_qualifier = _ask("  qualifier", completer=q_completer)
-                    else:
-                        rel_qualifier = _ask("  qualifier", complete_from_cwd=(cwd, content))
-                    if rel_qualifier:
-                        entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
-
-                relation_entries.append(entry)
-                more = _ask("  add another relation?", completer=["y", "n"], default="n")
-                if not _confirmed(more):
-                    break
+        # Ask for relations using the same flow as check-rel
+        relation_entries = _prompt_relations(project, cwd, content, kind_id, [])
 
         base_dir = resolve_content_path(path, cwd=cwd, content=content)
         entity_dir = base_dir / slug.rstrip("/")
@@ -2331,7 +2362,6 @@ def _cmd_check_relations(
         return
 
     kinds = kinds_root(project)
-    rel_by_slug = {r.slug: r for r in all_relations}
 
     for ent_dir, missing_slugs in report:
         md_file = ent_dir / "index.md"
@@ -2346,64 +2376,11 @@ def _cmd_check_relations(
 
         name = get("name") or ent_dir.name
         kind_id = get("kind")
-        applicable = world_cfg.applicable_relations(kind_id)
         existing_entries = parse_relation_entries(fm_lines)
-        existing_kinds = {e["kind"] for e in existing_entries}
 
         print(f"\n  {name}  ({ent_dir.relative_to(content)})")
 
-        new_entries: list[dict[str, str]] = list(existing_entries)
-        for rel_slug in missing_slugs:
-            # Re-check after possible earlier additions in this session
-            if rel_slug in {e["kind"] for e in new_entries}:
-                continue
-            rel_def = rel_by_slug.get(rel_slug)
-            codomain = rel_def.codomain if rel_def else []
-            qualifier_required = rel_def.qualifier_required if rel_def else False
-            qualifier_domain = rel_def.qualifier_domain if rel_def else []
-
-            print(f"  relation: {rel_slug}")
-
-            # How many instances to add (loop until the user leaves target blank)
-            while True:
-                used_targets = {e["target"] for e in new_entries if e["kind"] == rel_slug}
-                if codomain:
-                    tc = _KindSuggestedPathCompleter(content, cwd, codomain, exclude=used_targets)
-                    print(
-                        f"  (Tab to see targets for '{rel_slug}'"
-                        f"; kinds: {', '.join(codomain)})"
-                    )
-                    rel_target = _ask("  target (empty to skip)", completer=tc)
-                else:
-                    rel_target = _ask("  target (empty to skip)", complete_from_cwd=(cwd, content))
-
-                if not rel_target:
-                    break
-
-                entry: dict[str, str] = {
-                    "kind": rel_slug,
-                    "target": to_content_id(rel_target, cwd=cwd, content=content),
-                }
-
-                if qualifier_required:
-                    if qualifier_domain:
-                        q_completer = _KindSuggestedPathCompleter(content, cwd, qualifier_domain)
-                        print(
-                            f"  (qualifier required; Tab to see candidates"
-                            f"; kinds: {', '.join(qualifier_domain)})"
-                        )
-                        rel_qualifier = _ask("  qualifier", completer=q_completer)
-                    else:
-                        rel_qualifier = _ask("  qualifier", complete_from_cwd=(cwd, content))
-                    if rel_qualifier:
-                        entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
-
-                new_entries.append(entry)
-
-                # Ask whether to add another entry for the same relation kind
-                more = _ask(f"  add another '{rel_slug}'?", completer=["y", "n"], default="n")
-                if not _confirmed(more):
-                    break
+        new_entries = _prompt_relations(project, cwd, content, kind_id, existing_entries)
 
         # Write back only if we added something
         if len(new_entries) > len(existing_entries):
@@ -2441,7 +2418,7 @@ def _cmd_help() -> None:
   stats [path]                          entity / collection / kind counts (default: cwd)
   edit <path>                           edit entity or collection frontmatter
   check <path>                          list entities missing a world property
-  check-relations <path>                list entities missing ontology-defined relations; offer to fill them in
+  check-rel <path>                      list entities missing ontology-defined relations; offer to fill them in
   strip <path>                          remove a property from all entities that have it
   cd <path>                             change directory (relative or from content root)
   cd ..                                 go up one level
@@ -2543,7 +2520,7 @@ def run_shell(project: Path) -> None:
             _cmd_edit(project, cwd, content, args)
         elif cmd == "check":
             _cmd_check(project, cwd, content, args)
-        elif cmd == "check-relations":
+        elif cmd in ("check-rel", "check-relations"):
             _cmd_check_relations(project, cwd, content, args)
         elif cmd == "strip":
             _cmd_strip(project, cwd, content, args)

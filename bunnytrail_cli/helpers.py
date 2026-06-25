@@ -1519,10 +1519,12 @@ class CrosslinkPlan:
 
 
 def _parse_yaml_field(lines: list[str], field: str) -> str:
-    """Return the value of a bare scalar YAML field from a list of lines.
+    """Return the value of a scalar YAML field from a list of lines.
 
-    Handles simple ``field: value`` lines and block-scalar headers
-    (``field: >-`` / ``field: |``) by concatenating the indented body.
+    Checks top-level ``field: value`` lines first, then looks inside a
+    ``properties:`` block (two-space-indented) for the same field.
+    Handles block-scalar headers (``field: >-`` / ``field: |``) by
+    concatenating the indented body.
     Returns an empty string if the field is absent.
 
     *lines* should be the frontmatter lines only (use
@@ -1531,12 +1533,16 @@ def _parse_yaml_field(lines: list[str], field: str) -> str:
     field name.
     """
     prefix = f"{field}:"
+
+    # ── pass 1: top-level key ───────────────────────────────────────────────
     for i, line in enumerate(lines):
         stripped = line.strip()
         if not stripped.startswith(prefix):
             continue
+        # Make sure this is truly a top-level key (not inside a block)
+        if line[0] in (" ", "\t"):
+            continue
         rest = stripped[len(prefix):].strip()
-        # Block scalar — collect indented continuation lines
         if rest in (">-", ">", "|", "|-"):
             parts: list[str] = []
             for j in range(i + 1, len(lines)):
@@ -1546,15 +1552,38 @@ def _parse_yaml_field(lines: list[str], field: str) -> str:
                 else:
                     break
             return " ".join(parts)
-        # Inline value (may be quoted)
         return rest.strip("\"'")
+
+    # ── pass 2: look inside a properties: block ─────────────────────────────
+    in_properties = False
+    indented_prefix = f"  {field}:"
+    for i, line in enumerate(lines):
+        if line.rstrip() == "properties:":
+            in_properties = True
+            continue
+        if in_properties:
+            # End of the properties block: a non-empty, non-indented line
+            if line and line[0] not in (" ", "\t"):
+                break
+            if line.startswith(indented_prefix):
+                rest = line[len(indented_prefix):].strip()
+                if rest in (">-", ">", "|", "|-"):
+                    parts = []
+                    for j in range(i + 1, len(lines)):
+                        cont = lines[j]
+                        if cont and (cont[0] == " " or cont[0] == "\t"):
+                            parts.append(cont.strip())
+                        else:
+                            break
+                    return " ".join(parts)
+                return rest.strip("\"'")
     return ""
 
 
 # Keys that _write_entity_file handles via dedicated parameters; anything else
 # is "extra" and should be preserved verbatim.
 _ENTITY_HANDLED_KEYS: frozenset[str] = frozenset(
-    ["name", "kind", "type", "plural", "class", "summary", "era", "relations"]
+    ["name", "kind", "type", "plural", "class", "summary", "era", "relations", "properties"]
 )
 
 # Keys that belong to _kind.yaml files, not entity index.md files
