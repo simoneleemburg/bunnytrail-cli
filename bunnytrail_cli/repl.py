@@ -10,7 +10,9 @@ Run via `bt shell`.  Provides a prompt_toolkit REPL with:
 """
 from __future__ import annotations
 
+import re
 import shlex
+import sys
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -59,6 +61,16 @@ from .helpers import (
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+# Detect at import time whether prompt_toolkit can use the real terminal.
+# Pythonista and other embedded Python environments stub out sys.stdin without
+# a real file descriptor, which causes prompt_toolkit to crash.  In that case
+# every PromptSession call falls back to plain sys.stdin.readline().
+try:
+    sys.stdin.fileno()
+    _USE_PROMPT_TOOLKIT = True
+except Exception:
+    _USE_PROMPT_TOOLKIT = False
 
 HISTORY_FILE = Path.home() / ".bt_history"
 
@@ -605,14 +617,22 @@ def _ask(
     elif completer:
         pt_completer = WordCompleter(list(completer), match_middle=False)
 
-    session: PromptSession = PromptSession(
-        completer=pt_completer,
-        complete_style=CompleteStyle.MULTI_COLUMN,
-        complete_while_typing=False,
-        key_bindings=_make_tab_bindings(),
-    )
     try:
-        value = session.prompt(f"  {label}{hint}: ").strip()
+        if _USE_PROMPT_TOOLKIT:
+            session: PromptSession = PromptSession(
+                completer=pt_completer,
+                complete_style=CompleteStyle.MULTI_COLUMN,
+                complete_while_typing=False,
+                key_bindings=_make_tab_bindings(),
+            )
+            value = session.prompt(f"  {label}{hint}: ").strip()
+        else:
+            sys.stdout.write(f"  {label}{hint}: ")
+            sys.stdout.flush()
+            line = sys.stdin.readline()
+            if line == "":
+                raise EOFError
+            value = line.rstrip("\n").strip()
         if value:
             return value
         if allow_empty:
@@ -2454,16 +2474,8 @@ def run_shell(project: Path) -> None:
 
     shell_completer = _ShellCompleter(project)
     history = FileHistory(str(HISTORY_FILE))
-    # prompt_toolkit requires a real TTY; fall back to plain readline on
-    # environments like Pythonista where sys.stdin has no fileno().
-    _use_prompt_toolkit = True
-    try:
-        import sys as _sys
-        _sys.stdin.fileno()
-    except Exception:
-        _use_prompt_toolkit = False
 
-    if _use_prompt_toolkit:
+    if _USE_PROMPT_TOOLKIT:
         session: PromptSession = PromptSession(
             completer=shell_completer,
             complete_style=CompleteStyle.MULTI_COLUMN,
@@ -2493,13 +2505,10 @@ def run_shell(project: Path) -> None:
             if session is not None:
                 raw = session.prompt(ANSI(prompt_text))
             else:
-                import sys as _sys
-                # Strip ANSI codes for plain output
-                import re as _re
-                plain_prompt = _re.sub(r"\x1b\[[0-9;]*m", "", prompt_text)
-                _sys.stdout.write(plain_prompt)
-                _sys.stdout.flush()
-                raw = _sys.stdin.readline()
+                plain_prompt = re.sub(r"\x1b\[[0-9;]*m", "", prompt_text)
+                sys.stdout.write(plain_prompt)
+                sys.stdout.flush()
+                raw = sys.stdin.readline()
                 if raw == "":
                     print("\nBye.")
                     break
