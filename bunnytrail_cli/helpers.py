@@ -2503,6 +2503,70 @@ def read_kind_display_names(kind_dir: Path) -> tuple[str, str, str]:
     )
 
 
+def _prose_name_rewrite_refs(
+    entity_dir: Path,
+    old_name: str,
+    new_name: str,
+) -> list[MoveRef]:
+    """Scan the body prose of every ``*.md`` in *entity_dir* for literal
+    occurrences of *old_name* and produce :class:`MoveRef` replacements.
+
+    Only body lines are considered — frontmatter (``---`` ... ``---``) is
+    skipped entirely.  Lines that are ATX headings (``#`` prefix) are
+    included: a name in a heading is as valid a rewrite target as one in
+    a paragraph.
+
+    Occurrences already wrapped in a wikilink label (``|old_name]]``) are
+    intentionally *not* matched here — the existing display-rename pass in
+    :func:`_scan_entity_refs` handles those.  We skip any span that
+    falls inside ``[[...]]`` to avoid double-processing.
+
+    Matching is whole-word (``\\b``) and case-sensitive.
+    """
+    if not old_name or not new_name or old_name == new_name:
+        return []
+
+    wikilink_re = re.compile(r"\[\[[^\[\]\n]+?\]\]")
+    name_re = re.compile(r"\b" + re.escape(old_name) + r"\b")
+    refs: list[MoveRef] = []
+
+    for md_file in sorted(entity_dir.rglob("*.md")):
+        text = md_file.read_text(encoding="utf-8")
+        _, body = split_frontmatter(text)
+        if not body:
+            continue
+        # Body line numbers are offset by the frontmatter block size.
+        fm_str, _ = split_frontmatter(text)
+        fm_line_count = (len(fm_str.splitlines()) + 2) if fm_str is not None else 0
+        body_lines = body.splitlines()
+        for j, line in enumerate(body_lines):
+            if name_re.search(line) is None:
+                continue
+            # Build a mask of character ranges occupied by existing wikilinks
+            # so we don't touch the name inside [[...|OldName]] — those are
+            # handled by the label-rewrite pass.
+            wikilink_spans = [(m.start(), m.end()) for m in wikilink_re.finditer(line)]
+
+            new_line = line
+            offset = 0  # accumulated shift as we insert/replace
+            for m in name_re.finditer(line):
+                ms, me = m.start(), m.end()
+                # Skip if inside any existing wikilink span
+                if any(ws <= ms and me <= we for ws, we in wikilink_spans):
+                    continue
+                # Apply replacement, adjusted for any earlier substitutions
+                adj_s = ms + offset
+                adj_e = me + offset
+                new_line = new_line[:adj_s] + new_name + new_line[adj_e:]
+                offset += len(new_name) - len(old_name)
+
+            if new_line != line:
+                line_no = fm_line_count + j + 1
+                refs.append(MoveRef(md_file, line_no, line, new_line))
+
+    return refs
+
+
 def plan_rename(
     project: Path,
     old_path: str,
@@ -2733,6 +2797,7 @@ def plan_rename(
         )
 
         # Frontmatter edit on the renamed entity's own index.md.
+        # Prose-body rewrite across all *.md files in the entity folder.
         if display_renames:
             md = old_dir / "index.md"
             if md.is_file():
@@ -2742,6 +2807,8 @@ def plan_rename(
                     current={"name": old_name},
                 )
                 refs.extend(fm_refs)
+            new_name = new_display_names.get("name", old_name) if new_display_names else old_name
+            refs.extend(_prose_name_rewrite_refs(old_dir, old_name, new_name))
 
     return RenamePlan(
         old_id=old_id,

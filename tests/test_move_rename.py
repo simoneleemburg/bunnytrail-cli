@@ -853,3 +853,116 @@ def test_kind_rename_does_not_rewrite_partial_slug_match_in_ontology(project: Pa
     assert "humanoid" in text
     assert "human-culture" in text
     assert "personoid" not in text
+
+
+# ---------------------------------------------------------------------------
+# Prose body rewrite — entity's own *.md files
+# ---------------------------------------------------------------------------
+#
+# When a display name changes, every literal occurrence of the old name
+# in the renamed entity's own body prose is rewritten to the new name.
+# Wikilink labels (|OldName]]) are handled by the existing label-rewrite
+# pass and must NOT be double-processed here.
+
+
+def test_rename_rewrites_own_body_prose(project: Path) -> None:
+    # Body of the renamed entity itself mentions the old display name.
+    _write_body(project, "aurethia/places/sharazan",
+                "Sharazan is an ancient settlement.\n"
+                "The people of Sharazan are proud.\n")
+    plan = plan_rename(
+        project, "aurethia/places/sharazan", "sharazan-new",
+        new_display_names={"name": "Sharazan-Reborn"},
+    )
+    assert plan.error == ""
+    execute_rename(plan)
+    body = _read_body(project, "aurethia/places/sharazan-new")
+    assert "Sharazan-Reborn is an ancient settlement." in body
+    assert "The people of Sharazan-Reborn are proud." in body
+    # Old name must not survive in the body
+    assert "Sharazan" not in body.replace("Sharazan-Reborn", "")
+
+
+def test_rename_rewrites_sibling_article_prose(project: Path) -> None:
+    # A sibling *.md (not index.md) inside the renamed entity folder also gets updated.
+    history_md = project / "content" / "aurethia" / "places" / "sharazan" / "history.md"
+    history_md.write_text(
+        "---\ntitle: History of Sharazan\n---\n"
+        "Sharazan was founded long ago.\n",
+        encoding="utf-8",
+    )
+    plan = plan_rename(
+        project, "aurethia/places/sharazan", "sharazan-new",
+        new_display_names={"name": "Sharazan-Reborn"},
+    )
+    assert plan.error == ""
+    execute_rename(plan)
+    new_history = project / "content" / "aurethia" / "places" / "sharazan-new" / "history.md"
+    text = new_history.read_text()
+    assert "Sharazan-Reborn was founded long ago." in text
+
+
+def test_rename_prose_rewrite_skips_frontmatter(project: Path) -> None:
+    # Frontmatter lines must not be touched by the prose rewrite — only body lines.
+    # index.md has 'name: Sharazan' in frontmatter; that is handled by
+    # _frontmatter_field_edits, not by _prose_name_rewrite_refs.
+    plan = plan_rename(
+        project, "aurethia/places/sharazan", "sharazan-new",
+        new_display_names={"name": "Sharazan-Reborn"},
+    )
+    assert plan.error == ""
+    execute_rename(plan)
+    fm = _read_frontmatter(project, "aurethia/places/sharazan-new")
+    # name: field is updated exactly once by the frontmatter pass
+    assert "name: Sharazan-Reborn" in fm
+    assert fm.count("Sharazan-Reborn") == 1
+
+
+def test_rename_prose_rewrite_skips_wikilink_labels(project: Path) -> None:
+    # The body of the entity itself contains a wikilink to a *different* entity
+    # that happens to use the old name as a custom label — [[nuunlau|Sharazan]].
+    # The prose-body rewrite must not touch text inside [[...]]; the existing
+    # label-rewrite pass only updates labels on links that point at the renamed
+    # entity, so this custom label is intentionally left as-is by both passes.
+    _write_body(project, "aurethia/places/sharazan",
+                "Also known as [[nuunlau|Sharazan]] in old texts.\n")
+    plan = plan_rename(
+        project, "aurethia/places/sharazan", "sharazan-new",
+        new_display_names={"name": "Sharazan-Reborn"},
+    )
+    assert plan.error == ""
+    execute_rename(plan)
+    body = _read_body(project, "aurethia/places/sharazan-new")
+    # The custom label pointing to nuunlau is preserved as-is by both passes
+    assert "[[nuunlau|Sharazan]]" in body
+    # No spurious insertion of the new name inside the wikilink
+    assert "Sharazan-Reborn" not in body
+
+
+def test_rename_prose_rewrite_no_op_when_name_unchanged(project: Path) -> None:
+    # When no new display name is given, the prose body is left untouched.
+    _write_body(project, "aurethia/places/sharazan",
+                "Sharazan is an ancient settlement.\n")
+    plan = plan_rename(project, "aurethia/places/sharazan", "sharazan-new")
+    assert plan.error == ""
+    execute_rename(plan)
+    body = _read_body(project, "aurethia/places/sharazan-new")
+    # Body prose should be unchanged — the old display name still appears
+    assert "Sharazan is an ancient settlement." in body
+
+
+def test_rename_prose_rewrite_does_not_touch_other_entities(project: Path) -> None:
+    # The prose body of OTHER entities is left alone — only the entity's
+    # own folder is rewritten.
+    _write_body(project, "aurethia/people/duskmere",
+                "Duskmere lives near Sharazan.\n")
+    plan = plan_rename(
+        project, "aurethia/places/sharazan", "sharazan-new",
+        new_display_names={"name": "Sharazan-Reborn"},
+    )
+    assert plan.error == ""
+    execute_rename(plan)
+    body = _read_body(project, "aurethia/people/duskmere")
+    # Other entities' plain prose is not rewritten — only wikilinks in
+    # those files are updated by the existing scanner.
+    assert "Sharazan" in body
