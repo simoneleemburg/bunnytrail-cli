@@ -13,6 +13,8 @@ if __name__ == "__main__":
     # First try the sibling alteria_world folder (works when both repos are
     # checked out side-by-side, e.g. on Pythonista/iOS).
     sibling = _here.parent / "alteria_world"
+    print("sibling path:", sibling)
+    print("sibling exists:", sibling.is_dir())
     if sibling.is_dir():
         try:
             project = find_project_root(start=sibling)
@@ -28,9 +30,15 @@ if __name__ == "__main__":
         except FileNotFoundError:
             project = None
 
-    # Last resort: ask the user.
+    # Last resort: hardcoded fallback — edit this path if auto-detection fails.
     if project is None:
-        raw = input("Could not find alteria_world. Enter the full path to the project: ").strip()
-        project = Path(raw).expanduser().resolve()
+        FALLBACK_PATH = ""  # e.g. "/var/mobile/.../alteria_world"
+        if FALLBACK_PATH:
+            project = Path(FALLBACK_PATH).expanduser().resolve()
+        else:
+            raise FileNotFoundError(
+                "Could not find the alteria_world project.\n"
+                "Set the FALLBACK_PATH variable in run.py to the full path."
+            )
 
     run_shell(project)
