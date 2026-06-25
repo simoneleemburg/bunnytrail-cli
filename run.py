@@ -20,7 +20,9 @@ if __name__ == "__main__":
     if sibling.is_dir():
         try:
             project = find_project_root(start=sibling)
-        except FileNotFoundError:
+            print("project found:", project)
+        except FileNotFoundError as e:
+            print("find_project_root failed:", e)
             project = None
     else:
         project = None
