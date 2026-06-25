@@ -15,6 +15,8 @@ if __name__ == "__main__":
     sibling = _here.parent / "alteria_world"
     print("sibling path:", sibling)
     print("sibling exists:", sibling.is_dir())
+    print("has content:", (sibling / "content").is_dir())
+    print("has STRUCTURE.md:", (sibling / "STRUCTURE.md").is_file())
     if sibling.is_dir():
         try:
             project = find_project_root(start=sibling)
