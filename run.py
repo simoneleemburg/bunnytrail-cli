@@ -18,7 +18,7 @@ from bunnytrail_cli.repl import run_shell
 if __name__ == "__main__":
     # First try the sibling alteria_world folder (works when both repos are
     # checked out side-by-side, e.g. on Pythonista/iOS).
-    sibling = _here.parent / "alteria_world.git"
+    sibling = _here.parent / "alteria_world"
     if sibling.is_dir():
         try:
             project = find_project_root(start=sibling)
