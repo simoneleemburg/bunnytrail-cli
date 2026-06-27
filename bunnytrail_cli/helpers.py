@@ -29,13 +29,17 @@ import yaml
 def find_project_root(start: Path | None = None) -> Path:
     """Walk up from *start* (default: cwd) until we find the project root.
 
-    The project root is identified by the presence of both a ``content/``
-    directory and a ``STRUCTURE.md`` file.  Raises ``FileNotFoundError``
-    if no such ancestor exists.
+    The project root is identified by the presence of a ``content/``
+    directory, a ``content_meta/`` directory, and a ``content_meta/world.md``
+    file.  Raises ``FileNotFoundError`` if no such ancestor exists.
     """
     current = (start or Path.cwd()).resolve()
     for candidate in [current, *current.parents]:
-        if (candidate / "content").is_dir() and (candidate / "STRUCTURE.md").is_file():
+        if (
+            (candidate / "content").is_dir()
+            and (candidate / "content_meta").is_dir()
+            and (candidate / "content_meta" / "world.md").is_file()
+        ):
             return candidate
     raise FileNotFoundError(
         "Could not find the bunnytrail project root.  "
