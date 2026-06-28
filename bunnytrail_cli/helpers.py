@@ -1068,6 +1068,7 @@ class RelationDef:
     codomain: list[str] = field(default_factory=list)         # kind slugs; empty = unrestricted
     qualifier_required: bool = False
     qualifier_domain: list[str] = field(default_factory=list) # kind slugs; empty = unrestricted
+    symmetric: bool = False          # if True, A→B counts as B→A being satisfied
 
 
 @dataclass
@@ -1245,6 +1246,7 @@ def _load_ontology_relations(
                 codomain=_as_str_list(defn.get("codomain")),
                 qualifier_required=(defn.get("qualifier") == "required"),
                 qualifier_domain=_as_str_list(defn.get("qualifierDomain")),
+                symmetric=bool(defn.get("symmetric", False)),
             ))
     return relations
 

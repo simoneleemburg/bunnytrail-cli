@@ -2316,19 +2316,45 @@ def _cmd_check_relations(
     Report = list[tuple[Path, list[str]]]
     report: Report = []
 
+    # Pre-pass: collect per-entity data and build symmetric-coverage index.
+    # symmetric_covered[entity_rel_str] = set of relation slugs that are
+    # already satisfied by a reverse entry on another entity in the scan set.
+    EntityData = tuple[Path, list[str], list[dict[str, str]]]  # (dir, fm_lines, entries)
+    entity_data: list[EntityData] = []
     for ent_dir in entity_dirs:
         try:
             text = (ent_dir / "index.md").read_text(encoding="utf-8")
         except OSError:
             continue
         fm = frontmatter_lines(text)
+        entries = parse_relation_entries(fm)
+        entity_data.append((ent_dir, fm, entries))
+
+    symmetric_slugs = {r.slug for r in world_cfg.relations if r.symmetric}
+    # For each entity, find which symmetric relations point *at* it from other entities.
+    # symmetric_covered[rel_path_str] = set of symmetric relation slugs satisfied by reverse
+    symmetric_covered: dict[str, set[str]] = {}
+    if symmetric_slugs:
+        for ent_dir, _fm, entries in entity_data:
+            for entry in entries:
+                slug = entry.get("kind", "")
+                target = entry.get("target", "")
+                if slug in symmetric_slugs and target:
+                    symmetric_covered.setdefault(target, set()).add(slug)
+
+    for ent_dir, fm, existing_entries in entity_data:
         kind_id = _parse_yaml_field(fm, "kind")
         applicable = world_cfg.applicable_relations(kind_id)
         if not applicable:
             continue
-        existing_entries = parse_relation_entries(fm)
         existing_kinds = {e["kind"] for e in existing_entries}
-        missing = [r.slug for r in applicable if r.slug not in existing_kinds]
+        ent_rel = str(ent_dir.relative_to(content))
+        covered_by_reverse = symmetric_covered.get(ent_rel, set())
+        missing = [
+            r.slug for r in applicable
+            if r.slug not in existing_kinds
+            and r.slug not in covered_by_reverse
+        ]
         if missing:
             report.append((ent_dir, missing))
 
