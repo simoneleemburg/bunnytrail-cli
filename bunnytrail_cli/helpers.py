@@ -177,6 +177,100 @@ def is_collection_folder(path: Path) -> bool:
     return (path / "_collection.md").is_file()
 
 
+def is_timeline_folder(path: Path) -> bool:
+    """A timeline *line* folder carries a ``_time.md`` with no ``year:`` field.
+
+    These are the container timelines (type: period/line) that hold dot
+    entries as sub-folders.
+    """
+    md = path / "_time.md"
+    if not md.is_file():
+        return False
+    try:
+        text = md.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # Scan only inside the frontmatter fences
+    lines = text.splitlines()
+    in_fm = False
+    for line in lines:
+        if line.strip() == "---":
+            if not in_fm:
+                in_fm = True
+                continue
+            else:
+                break  # closing fence reached
+        if in_fm and line.startswith("year:"):
+            return False
+    return in_fm  # True only if we actually entered a frontmatter block
+
+
+def is_timeline_dot_folder(path: Path) -> bool:
+    """A timeline *dot* folder carries a ``_time.md`` with a ``year:`` field."""
+    md = path / "_time.md"
+    if not md.is_file():
+        return False
+    try:
+        text = md.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if line.startswith("year:"):
+            return True
+    return False
+
+
+def write_timeline_line(
+    path: Path,
+    name: str,
+    summary: str,
+    targets: "list[str]",
+    timeline_type: str = "period",
+) -> None:
+    """Write a timeline *line* ``_time.md`` file.
+
+    *targets* is a list of content-relative entity paths.  If there is
+    exactly one target it is written as a scalar; multiple targets are
+    written as a YAML list.
+    """
+    fm_parts = []
+    if name:
+        fm_parts.append(f"name: {name}")
+    if summary:
+        fm_parts.append(f"summary: {summary}")
+    if timeline_type and timeline_type != "period":
+        fm_parts.append(f"type: {timeline_type}")
+    else:
+        fm_parts.append("type: period")
+    if len(targets) == 1:
+        fm_parts.append(f"target: {targets[0]}")
+    elif targets:
+        fm_parts.append("target:")
+        for t in targets:
+            fm_parts.append(f" - {t}")
+    fm = "\n".join(fm_parts)
+    path.write_text(f"---\n{fm}\n---\n", encoding="utf-8")
+
+
+def write_timeline_dot(
+    path: Path,
+    year: int,
+    summary: str = "",
+    body: str = "",
+) -> None:
+    """Write a timeline *dot* ``_time.md`` file.
+
+    *body* is prose content placed after the closing frontmatter fence.
+    """
+    fm_parts = [f"year: {year}"]
+    if summary:
+        fm_parts.append(f"summary: {summary}")
+    fm = "\n".join(fm_parts)
+    body_text = body.lstrip("\n")
+    sep = "\n\n" if body_text else "\n"
+    path.write_text(f"---\n{fm}\n---{sep}{body_text}", encoding="utf-8")
+
+
 def list_tree(base: Path, indent: int = 0, max_depth: int = 4) -> list[str]:
     """Return a simple text tree of *base* up to *max_depth*."""
     if indent > max_depth:

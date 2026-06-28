@@ -37,6 +37,8 @@ from .helpers import (
     format_diff_pair,
     format_refs,
     is_entity_folder,
+    is_timeline_dot_folder,
+    is_timeline_folder,
     iter_collections,
     iter_entity_md_files,
     iter_kind_md_files,
@@ -56,6 +58,8 @@ from .helpers import (
     to_content_id,
     use_color,
     write_frontmatter_md,
+    write_timeline_dot,
+    write_timeline_line,
 )
 
 # ---------------------------------------------------------------------------
@@ -94,7 +98,7 @@ TOP_LEVEL_COMMANDS = [
     "quit",
 ]
 
-ADD_SUBCOMMANDS = ["entity", "collection", "kind", "ontology"]
+ADD_SUBCOMMANDS = ["entity", "collection", "kind", "ontology", "timeline", "time-entry"]
 
 # ANSI colour helpers
 _GREEN  = "\033[1;32m"
@@ -537,6 +541,12 @@ class _ShellCompleter(Completer):
                 elif sub == "ontology":
                     if len(tokens) == 3:
                         yield from _yield_paths(fragment, self._kinds, frag_start)
+                elif sub == "timeline":
+                    if len(tokens) == 3:
+                        yield from _yield_paths(fragment, self.cwd, frag_start)
+                elif sub == "time-entry":
+                    if len(tokens) == 3:
+                        yield from _yield_paths(fragment, self.cwd, frag_start)
 
         elif cmd == "move":
             has_kind_flag = "--kind" in tokens
@@ -687,7 +697,14 @@ def _cmd_ls(cwd: Path, content: Path) -> None:
         if child.name.startswith("_") and child.name not in ("_collection.md",):
             continue
         if child.is_dir():
-            marker = "[E]" if is_entity_folder(child) else "[C]"
+            if is_entity_folder(child):
+                marker = "[E]"
+            elif is_timeline_folder(child):
+                marker = "[T]"
+            elif is_timeline_dot_folder(child):
+                marker = "[Y]"
+            else:
+                marker = "[C]"
             print(f"  {marker} {child.name}/")
         elif child.suffix == ".md":
             print(f"       {child.name}")
@@ -905,6 +922,93 @@ def _prompt_single_field(
     return True
 
 
+def _cmd_edit_timeline(
+    project: Path, cwd: Path, content: Path, target: Path
+) -> None:
+    """Interactively edit a timeline *line* ``_time.md``."""
+    from .helpers import frontmatter_lines, _parse_yaml_field, split_frontmatter  # type: ignore[attr-defined]
+
+    md_file = target / "_time.md"
+    try:
+        text = md_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"  cannot read {md_file}: {exc}")
+        return
+    fm_str, _body = split_frontmatter(text)
+    fm_lines = (fm_str or "").splitlines()
+    get = lambda f: _parse_yaml_field(fm_lines, f)
+
+    name = _ask("name (optional)", default=get("name")) or ""
+    if name is None:
+        return
+    summary = _ask("summary (optional)", default=get("summary")) or ""
+    if summary is None:
+        return
+
+    # Re-collect targets
+    raw_targets = get("target") or ""
+    existing_targets: list[str] = []
+    for line in fm_lines:
+        s = line.strip()
+        if s.startswith("target:"):
+            val = s[len("target:"):].strip()
+            if val:
+                existing_targets = [val]
+        elif existing_targets is not None and s.startswith("- "):
+            existing_targets.append(s[2:].strip())
+
+    print(f"  current targets: {existing_targets or '(none)'}")
+    print("  re-enter targets (empty line to finish):")
+    targets: list[str] = []
+    idx = 1
+    while True:
+        raw_t = _ask(f"  target {idx}", complete_from_cwd=(cwd, content))
+        if not raw_t:
+            break
+        targets.append(to_content_id(raw_t, cwd=cwd, content=content))
+        idx += 1
+    if not targets:
+        targets = existing_targets  # keep old targets if none entered
+
+    write_timeline_line(md_file, name, summary, targets)
+    print(f"  updated {md_file.relative_to(project)}")
+
+
+def _cmd_edit_timeline_dot(
+    project: Path, cwd: Path, content: Path, target: Path
+) -> None:
+    """Interactively edit a timeline *dot* ``_time.md``."""
+    from .helpers import frontmatter_lines, _parse_yaml_field, split_frontmatter  # type: ignore[attr-defined]
+
+    md_file = target / "_time.md"
+    try:
+        text = md_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"  cannot read {md_file}: {exc}")
+        return
+    fm_str, body = split_frontmatter(text)
+    fm_lines = (fm_str or "").splitlines()
+    get = lambda f: _parse_yaml_field(fm_lines, f)
+
+    raw_year = get("year") or target.name
+    try:
+        year = int(raw_year)
+    except ValueError:
+        print(f"  cannot determine year from frontmatter or folder name")
+        return
+
+    summary = _ask("summary (optional)", default=get("summary")) or ""
+    if summary is None:
+        return
+    body_val = _ask("prose (optional; use \\n for newlines)", default=body.strip()) or body.strip()
+    if body_val is None:
+        return
+    body_val = body_val.replace("\\n", "\n")
+
+    write_timeline_dot(md_file, year, summary, body_val)
+    print(f"  updated {md_file.relative_to(project)}")
+
+
 def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
     from .helpers import (  # type: ignore[attr-defined]
         frontmatter_lines,
@@ -961,6 +1065,14 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
         for child in sorted(target.rglob("index.md")):
             if is_entity_folder(child.parent):
                 entity_targets.append(child.parent)
+    elif is_timeline_folder(target):
+        # Edit a timeline line's _time.md
+        _cmd_edit_timeline(project, cwd, content, target)
+        return
+    elif is_timeline_dot_folder(target):
+        # Edit a timeline dot entry's _time.md
+        _cmd_edit_timeline_dot(project, cwd, content, target)
+        return
     else:
         print(f"  not an entity or collection folder: {path_label}")
         return
@@ -1948,6 +2060,87 @@ def _cmd_add(
             lines_out.append(f"description: {description}")
         yaml_file.write_text(("\n".join(lines_out) + "\n") if lines_out else "", encoding="utf-8")
         print(f"  created {yaml_file.relative_to(project)}")
+        return None
+
+    if sub == "timeline":
+        # add timeline [path] [slug] [name]
+        # Creates a folder with a _time.md (line/container).
+        path  = args[1] if len(args) > 1 else None
+        slug  = args[2] if len(args) > 2 else None
+        name  = " ".join(args[3:]) if len(args) > 3 else None
+
+        if path is None:
+            path = _ask("path", complete_from_cwd=(cwd, content), default=".")
+            if path is None:
+                return None
+
+        if slug is None:
+            slug = _ask("slug")
+            if not slug:
+                return None
+        slug = slug.rstrip("/")
+
+        if name is None:
+            name = _ask("name (optional)", default=_slug_to_title(slug))
+            if name is None:
+                return None
+
+        summary = _ask("summary (optional)") or ""
+
+        # One or more target entity paths (space/comma separated, or entered one by one)
+        targets: list[str] = []
+        print("  targets (entity paths; empty line to finish):")
+        while True:
+            raw_target = _ask(f"  target {len(targets) + 1}", complete_from_cwd=(cwd, content))
+            if not raw_target:
+                break
+            targets.append(to_content_id(raw_target, cwd=cwd, content=content))
+
+        base_dir = resolve_content_path(path, cwd=cwd, content=content)
+        timeline_dir = base_dir / slug
+        md_file = timeline_dir / "_time.md"
+        if md_file.exists():
+            print(f"  already exists: {md_file.relative_to(project)}")
+            return None
+        timeline_dir.mkdir(parents=True, exist_ok=True)
+        write_timeline_line(md_file, name or "", summary, targets)
+        print(f"  created {md_file.relative_to(project)}")
+        return None
+
+    if sub == "time-entry":
+        # add time-entry [path] [year]
+        # Creates a <year>/_time.md dot entry inside an existing timeline folder.
+        path = args[1] if len(args) > 1 else None
+        year_arg = args[2] if len(args) > 2 else None
+
+        if path is None:
+            path = _ask("timeline path", complete_from_cwd=(cwd, content))
+            if not path:
+                return None
+
+        if year_arg is None:
+            year_arg = _ask("year")
+            if not year_arg:
+                return None
+        try:
+            year = int(year_arg)
+        except ValueError:
+            print(f"  invalid year: {year_arg!r}")
+            return None
+
+        summary = _ask("summary (optional)") or ""
+        body = _ask("prose (optional; use \\n for newlines)") or ""
+        body = body.replace("\\n", "\n")
+
+        base_dir = resolve_content_path(path, cwd=cwd, content=content)
+        dot_dir = base_dir / str(year)
+        md_file = dot_dir / "_time.md"
+        if md_file.exists():
+            print(f"  already exists: {md_file.relative_to(project)}")
+            return None
+        dot_dir.mkdir(parents=True, exist_ok=True)
+        write_timeline_dot(md_file, year, summary, body)
+        print(f"  created {md_file.relative_to(project)}")
         return None
 
 
