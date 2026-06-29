@@ -817,6 +817,12 @@ def _write_entity_file(
             fm += f"\n    target: {entry['target']}"
             if "qualifier" in entry:
                 fm += f"\n    qualifier: {entry['qualifier']}"
+            if "date" in entry:
+                fm += f"\n    date: {entry['date']}"
+            if "from" in entry:
+                fm += f"\n    from: {entry['from']}"
+            if "to" in entry:
+                fm += f"\n    to: {entry['to']}"
     write_frontmatter_md(md_file, fm, body)
 
 
@@ -1237,6 +1243,19 @@ def _cmd_edit(project: Path, cwd: Path, content: Path, args: list[str]) -> None:
                             rel_qualifier = _ask("  qualifier", complete_from_cwd=(cwd, content))
                         if rel_qualifier:
                             entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
+                    if rel_def and rel_def.temporal == "moment":
+                        print(f"  (temporal: moment — single date, e.g. 1952-03-14)")
+                        rel_date = _ask("  date (optional)", default="")
+                        if rel_date:
+                            entry["date"] = rel_date
+                    elif rel_def and rel_def.temporal == "range":
+                        print(f"  (temporal: range — start/end dates, e.g. 1952-03-14)")
+                        rel_from = _ask("  from (optional)", default="")
+                        if rel_from:
+                            entry["from"] = rel_from
+                        rel_to = _ask("  to (optional)", default="")
+                        if rel_to:
+                            entry["to"] = rel_to
                     relation_entries.append(entry)
                     more = _ask("  add another relation?", completer=["y", "n"], default="n")
                     if not _confirmed(more):
@@ -1749,6 +1768,7 @@ def _prompt_relations(
         codomain = rel_def.codomain
         qualifier_required = rel_def.qualifier_required
         qualifier_domain = rel_def.qualifier_domain
+        temporal = rel_def.temporal
 
         print(f"  relation: {rel_slug}")
 
@@ -1784,6 +1804,20 @@ def _prompt_relations(
                     rel_qualifier = _ask("  qualifier", complete_from_cwd=(cwd, content))
                 if rel_qualifier:
                     entry["qualifier"] = to_content_id(rel_qualifier, cwd=cwd, content=content)
+
+            if temporal == "moment":
+                print(f"  (temporal: moment — single date, e.g. 1952-03-14)")
+                rel_date = _ask("  date (optional)", default="")
+                if rel_date:
+                    entry["date"] = rel_date
+            elif temporal == "range":
+                print(f"  (temporal: range — start/end dates, e.g. 1952-03-14)")
+                rel_from = _ask("  from (optional)", default="")
+                if rel_from:
+                    entry["from"] = rel_from
+                rel_to = _ask("  to (optional)", default="")
+                if rel_to:
+                    entry["to"] = rel_to
 
             new_entries.append(entry)
 

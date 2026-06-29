@@ -337,6 +337,12 @@ def iter_collection_md_files(content: Path):
         yield md_file
 
 
+def iter_time_md_files(content: Path):
+    """Yield every ``_time.md`` file under *content* (both line and dot timelines)."""
+    for md_file in content.rglob("_time.md"):
+        yield md_file
+
+
 def iter_guide_md_files(guides: Path):
     """Yield every ``index.md`` directly under a guide folder."""
     if not guides.is_dir():
@@ -353,14 +359,15 @@ def iter_link_consumer_files(project: Path):
     moved or renamed.
 
     Currently: entity ``index.md``, collection ``_collection.md``,
-    kind ``_kind.yaml``, and guide ``index.md``. Blog posts are
-    deliberately excluded — wikilinks do not resolve in blog prose
-    (see STRUCTURE.md).
+    timeline ``_time.md``, kind ``_kind.yaml``, and guide ``index.md``.
+    Blog posts are deliberately excluded — wikilinks do not resolve in
+    blog prose (see STRUCTURE.md).
     """
     content = content_root(project)
     if content.is_dir():
         yield from iter_entity_md_files(content)
         yield from iter_collection_md_files(content)
+        yield from iter_time_md_files(content)
     kinds = kinds_root(project)
     if kinds.is_dir():
         yield from iter_kind_md_files(kinds)
@@ -524,8 +531,15 @@ def _scan_entity_refs(
         r"(?P<suffix>(?:\s+.*)?)$"
     )
 
+    # Matches a bare YAML list item that is exactly old_id (used for
+    # the multi-target block form in timeline _time.md: "- <entity-id>")
+    timeline_target_item_re = re.compile(
+        r"^(?P<prefix>\s*-\s+)(?P<id>" + re.escape(old_id) + r")(?P<suffix>\s*)$"
+    )
+
     for md_file in iter_link_consumer_files(project):
         is_entity = md_file.name == "index.md" and is_entity_folder(md_file.parent)
+        is_timeline = md_file.name == "_time.md" and is_timeline_folder(md_file.parent)
         page_id = page_id_for(md_file, project)
         page_cluster = scope_of(page_id, index)
         # Frontmatter region is needed so we don't try to resolve
@@ -538,17 +552,30 @@ def _scan_entity_refs(
             fm_line_count = len(fm.splitlines()) + 2
 
         lines = text.splitlines()
+        in_target_list = False  # tracks multi-value target: block in _time.md
         for i, line in enumerate(lines, start=1):
             in_frontmatter = i <= fm_line_count
 
-            # ---- target: rewrites only inside entity frontmatter ---
+            # ---- target: rewrites inside entity and timeline-line frontmatter ---
             if in_frontmatter:
-                if is_entity:
+                if is_entity or is_timeline:
                     m = target_re.match(line)
                     if m:
+                        # Scalar target: or single-item "- target:" form
+                        in_target_list = False
                         new_line = m.group("prefix") + new_id + m.group("suffix")
                         refs.append(MoveRef(md_file, i, line, new_line))
-                    else:
+                    elif is_timeline and line.rstrip() == "target:":
+                        # Opening of a block-list target: — note the key, no rewrite
+                        in_target_list = True
+                    elif is_timeline and in_target_list:
+                        m2 = timeline_target_item_re.match(line)
+                        if m2:
+                            new_line = m2.group("prefix") + new_id + m2.group("suffix")
+                            refs.append(MoveRef(md_file, i, line, new_line))
+                        elif line.strip() and not line.strip().startswith("-"):
+                            in_target_list = False  # left the list
+                    elif is_entity:
                         m = extra_path_re.match(line)
                         if m:
                             new_line = m.group("prefix") + new_id + m.group("suffix")
@@ -1163,6 +1190,7 @@ class RelationDef:
     qualifier_required: bool = False
     qualifier_domain: list[str] = field(default_factory=list) # kind slugs; empty = unrestricted
     symmetric: bool = False          # if True, A→B counts as B→A being satisfied
+    temporal: str = ""               # "" | "moment" | "range" — time shape for instances
 
 
 @dataclass
@@ -1332,6 +1360,8 @@ def _load_ontology_relations(
             if not isinstance(defn, dict):
                 defn = {}
             full_slug = prefix + str(bare_slug)
+            raw_temporal = defn.get("temporal") or ""
+            temporal = str(raw_temporal) if raw_temporal in ("moment", "range") else ""
             relations.append(RelationDef(
                 slug=full_slug,
                 out_label=str(defn.get("outLabel") or ""),
@@ -1341,6 +1371,7 @@ def _load_ontology_relations(
                 qualifier_required=(defn.get("qualifier") == "required"),
                 qualifier_domain=_as_str_list(defn.get("qualifierDomain")),
                 symmetric=bool(defn.get("symmetric", False)),
+                temporal=temporal,
             ))
     return relations
 
@@ -1383,7 +1414,8 @@ def parse_relation_entries(fm_lines: list[str]) -> list[dict[str, str]]:
     """Parse the ``relations:`` block from frontmatter lines.
 
     Returns a list of dicts with keys ``kind``, ``target``, and optionally
-    ``qualifier`` — one dict per relation list item.
+    ``qualifier``, ``date`` (moment), ``from``, ``to`` (range) — one dict per
+    relation list item.
     """
     entries: list[dict[str, str]] = []
     in_rel = False
@@ -1405,6 +1437,12 @@ def parse_relation_entries(fm_lines: list[str]) -> list[dict[str, str]]:
             cur["target"] = s[len("target:"):].strip()
         elif s.startswith("qualifier:"):
             cur["qualifier"] = s[len("qualifier:"):].strip()
+        elif s.startswith("date:"):
+            cur["date"] = s[len("date:"):].strip()
+        elif s.startswith("from:"):
+            cur["from"] = s[len("from:"):].strip()
+        elif s.startswith("to:"):
+            cur["to"] = s[len("to:"):].strip()
         elif s and not s.startswith("-"):
             in_rel = False
     if cur:
@@ -2085,14 +2123,16 @@ def plan_crosslink(project: Path, article_path: str, namespace_path: str) -> Cro
         md_file = article_dir / "index.md"
     elif is_collection_folder(article_dir):
         md_file = article_dir / "_collection.md"
+    elif is_timeline_dot_folder(article_dir):
+        md_file = article_dir / "_time.md"
     else:
         return CrosslinkPlan(
             article_id=article_path, md_file=article_dir / "index.md",
             namespace=namespace_path,
             error=(
-                f"not an entity, collection, or guide folder "
-                f"(no index.md with frontmatter, _collection.md, "
-                f"or guide index.md): {article_display}"
+                f"not an entity, collection, guide, or timeline-dot folder "
+                f"(no index.md with frontmatter, _collection.md, _time.md "
+                f"with year:, or guide index.md): {article_display}"
             ),
         )
 
@@ -2405,13 +2445,14 @@ def plan_crosslink_folder(
         is_entity_folder(target_dir)
         or is_collection_folder(target_dir)
         or is_guide_folder
+        or is_timeline_dot_folder(target_dir)
     ):
         return [plan_crosslink(project, target_path, namespace_path)], ""
 
     # Folder case: walk and plan each descendant article.  Articles
-    # are entities, collections, and (when walking the guides root)
-    # guides.  Collection bodies are typically empty today but the
-    # same matching rules apply when they aren't.
+    # are entities, collections, timeline dots, and (when walking the
+    # guides root) guides.  Collection bodies are typically empty today
+    # but the same matching rules apply when they aren't.
     plans: list[CrosslinkPlan] = []
     seen_ids: set[str] = set()
     if target_dir == guides_dir or guides_dir in target_dir.parents:
@@ -2434,9 +2475,17 @@ def plan_crosslink_folder(
                 continue
             seen_ids.add(collection_id)
             plans.append(plan_crosslink(project, collection_id, namespace_path))
+        for time_md in sorted(iter_time_md_files(target_dir)):
+            if not is_timeline_dot_folder(time_md.parent):
+                continue  # skip line _time.md — no prose to crosslink
+            dot_id = str(time_md.parent.relative_to(content))
+            if dot_id in seen_ids:
+                continue
+            seen_ids.add(dot_id)
+            plans.append(plan_crosslink(project, dot_id, namespace_path))
 
     if not plans:
-        return [], f"no entities, collections, or guides found under {target_display}"
+        return [], f"no entities, collections, guides, or timeline entries found under {target_display}"
 
     return plans, ""
 
@@ -3137,6 +3186,12 @@ def _scan_collection_refs(
         + re.escape(old_collection_id)
         + r"(?:/[A-Za-z0-9_\-/]+)?)(?P<suffix>\s*)$"
     )
+    # Bare list item form for multi-target timeline _time.md:  "- <entity-id>"
+    timeline_target_item_re = re.compile(
+        r"^(?P<prefix>\s*-\s+)(?P<id>"
+        + re.escape(old_collection_id)
+        + r"(?:/[A-Za-z0-9_\-/]+)?)(?P<suffix>\s*)$"
+    )
     # Other frontmatter fields that store entity paths (class:, qualifier:,
     # within:, species:).  Same prefix-cascade logic as target_re.
     _coll_path_fields = "|".join(
@@ -3150,6 +3205,7 @@ def _scan_collection_refs(
 
     for md_file in iter_link_consumer_files(project):
         is_entity = md_file.name == "index.md" and is_entity_folder(md_file.parent)
+        is_timeline = md_file.name == "_time.md" and is_timeline_folder(md_file.parent)
         page_id = page_id_for(md_file, project)
         page_cluster = scope_of(page_id, index)
         text = md_file.read_text(encoding="utf-8")
@@ -3159,18 +3215,31 @@ def _scan_collection_refs(
             fm_line_count = len(fm.splitlines()) + 2
 
         lines = text.splitlines()
+        in_target_list = False  # tracks multi-value target: block in _time.md
         for i, line in enumerate(lines, start=1):
             in_frontmatter = i <= fm_line_count
 
             if in_frontmatter:
-                if is_entity:
+                if is_entity or is_timeline:
                     m = target_re.match(line)
                     if m:
+                        in_target_list = False
                         new_id = cascade(m.group("id"))
                         if new_id != m.group("id"):
                             new_line = m.group("prefix") + new_id + m.group("suffix")
                             refs.append(MoveRef(md_file, i, line, new_line))
-                    else:
+                    elif is_timeline and line.rstrip() == "target:":
+                        in_target_list = True
+                    elif is_timeline and in_target_list:
+                        m2 = timeline_target_item_re.match(line)
+                        if m2:
+                            new_id = cascade(m2.group("id"))
+                            if new_id != m2.group("id"):
+                                new_line = m2.group("prefix") + new_id + m2.group("suffix")
+                                refs.append(MoveRef(md_file, i, line, new_line))
+                        elif line.strip() and not line.strip().startswith("-"):
+                            in_target_list = False
+                    elif is_entity:
                         m = extra_path_re.match(line)
                         if m:
                             new_id = cascade(m.group("id"))

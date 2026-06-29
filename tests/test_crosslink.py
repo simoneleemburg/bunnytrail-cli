@@ -114,7 +114,7 @@ def test_crosslink_folder_empty_directory_reports_no_entities(
         project, "aurethia/empty-shelf", "aurethia/places"
     )
     assert plans == []
-    assert "no entities, collections, or guides found" in err
+    assert "no entities, collections" in err
 
 
 def test_crosslink_folder_missing_namespace(project: Path) -> None:
